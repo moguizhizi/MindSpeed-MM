@@ -1,0 +1,3 @@
+examples/test_img1.jpg
+examples/test_img2.jpg
+examples/test_img3.jpg
