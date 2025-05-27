@@ -1,0 +1,1 @@
+examples/cogvideox/astronaut.jpg

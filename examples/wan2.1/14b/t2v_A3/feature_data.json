@@ -1,0 +1,50 @@
+{
+    "dataset_param": {
+        "dataset_type": "t2v",
+        "use_feature_data": true,
+        "basic_parameters": {
+            "data_path": "./examples/wan2.1/14b/t2v_A3/data.txt",
+            "data_storage_mode": "sorafeatured",
+            "use_text_feature": true,
+            "use_video_feature": true
+        },
+        "preprocess_parameters": {
+            "video_reader_type": "decoder",
+            "image_reader_type": "Image",
+            "num_frames": 81,
+            "frame_interval": 1,
+            "max_height": 480,
+            "max_width": 832,
+            "max_hxw": 399360,
+            "train_fps": 24,
+            "speed_factor": 1.0,
+            "drop_short_ratio": 0.0,
+            "cfg": 0.0,
+            "hw_stride": 8,
+            "force_resolution": false,
+            "dataloader_num_workers": 8,
+            "hw_aspect_thr": 2.0
+        },
+        "use_text_processer": true,
+        "enable_text_preprocessing": false,
+        "tokenizer_config": [
+            {
+                "autotokenizer_name": "AutoTokenizer",
+                "hub_backend": "hf",
+                "from_pretrained": "Wan2.1-T2V-14B-Diffusers/tokenizer",
+                "model_max_length": 256
+            }
+        ]
+    },
+    "dataloader_param": {
+        "dataloader_mode": "sampler",
+        "sampler_type": "LengthGroupedSampler",
+        "shuffle": false,
+        "drop_last": true,
+        "pin_memory": true,
+        "group_frame": false,
+        "group_resolution": false,
+        "group_data": true,
+        "initial_global_step_for_sampler": 0
+    }
+}

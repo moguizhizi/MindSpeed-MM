@@ -1,0 +1,71 @@
+{
+    "load_video_features": false,
+    "load_text_features": false,
+    "enable_encoder_dp": false,
+    "dpo": {
+      "histgram_path": "/video_path/video_score_histogram.json",
+      "weight_alpha": 0,
+      "weight_beta": null,
+      "loss_beta": 2000
+    },
+    "predictor": {
+        "model_id": "stepvideodit",
+        "from_pretrained": null,
+        "dtype": "bf16",
+        "num_layers" : 1,
+        "num_attention_heads": 1,
+        "attention_head_dim": 128,
+        "channel_split": [64, 32, 32],
+        "in_channels": 64,
+        "out_channels": 64,
+        "dropout": 0.0,
+        "patch_size": 1,
+        "patch_size_thw": [1, 1, 1],
+        "norm_type": "ada_norm_single",
+        "norm_elementwise_affine": false,
+        "norm_eps": 1e-6,
+        "use_additional_conditions": false,
+        "caption_channels": [6144, 1024],
+
+        "attention_norm_type": "rmsnorm",
+        "attention_norm_elementwise_affine": true,
+        "attention_norm_eps": 1e-6,
+        "fa_layout": "bsnd"
+    },
+    "diffusion": {
+        "model_id": "DDPM",
+        "num_train_steps":1000,
+        "guidance_scale":7.5,
+        "prediction_type": "v_prediction",
+        "rescale_betas_zero_snr": true,
+        "timestep_spacing": "leading",
+        "device":"npu",
+        "snr_gamma": 5.0,
+        "t_sample_method": "explicit_uniform"
+    },
+    "text_encoder": [
+        {
+            "model_id": "StepLLmModel",
+            "hub_backend": "hf",
+            "from_pretrained": "./weights/step_llm/",
+            "dtype": "bf16"
+        },
+        {
+            "model_id": "BertModel",
+            "hub_backend": "hf",
+            "from_pretrained": "./weights/hunyuan_clip/clip_text_encoder",
+            "dtype": "float32"
+        }
+    ],
+    "ae": {
+        "model_id": "stepvideovae",
+        "from_pretrained": "./weights/vae/vae_v2.safetensors",
+        "dtype": "bf16",
+        "z_channels": 64,
+        "version": 2
+    },
+    "patch": {
+        "ae_float32": true
+    }
+}
+

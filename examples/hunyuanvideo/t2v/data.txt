@@ -1,0 +1,1 @@
+./hunyuanvideo/sora_featuers/,./hunyuanvideo/sora_featuers/data.jsonl
