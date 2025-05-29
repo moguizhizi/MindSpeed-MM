@@ -1,6 +1,7 @@
 {
     "model_id": "qwen2_5vl",
     "img_context_token_id": 151655,
+    "image_token_id": 151655,
     "video_token_id": 151656,
     "vision_start_token_id": 151652,
     "image_encoder": {

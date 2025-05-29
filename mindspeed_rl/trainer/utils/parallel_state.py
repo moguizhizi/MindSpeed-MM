@@ -62,7 +62,7 @@ def get_model_parallel_group(mpu, use_vllm=False):
         import vllm
         from vllm.distributed import parallel_state as vpu
 
-        if vllm.__version__ in ["0.7.3", "0.8.5.post1"]:
+        if vllm.__version__ in ["0.7.3", "0.8.5.post1", "0.7.3+empty", "0.8.5.post1+empty"]:
             return vpu.get_tensor_model_parallel_group().device_group
         else:
             if not hasattr(vpu, "get_tensor_model_parallel_group"):

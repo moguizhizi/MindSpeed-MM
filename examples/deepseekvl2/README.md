@@ -92,9 +92,11 @@ MindSpeed-MM修改了部分原始网络的结构名称，使用`mm-convert`工�
 
 `mm-convert`工具详细用法参考[权重转换工具](https://gitee.com/ascend/MindSpeed-MM/blob/master/docs/features/权重转换工具.md)
 
-*注意：DeepSeekVL权重转换依赖deepseekvl2包，安装过程参考[链接](https://github.com/deepseek-ai/DeepSeek-VL2)。*
+**注意**
+1. DeepSeekVL权重转换依赖deepseekvl2包，安装过程参考[链接](https://github.com/deepseek-ai/DeepSeek-VL2)。
+2. 转换前需要在hf格式权重目录下，修改config.json的`"_attn_implementation"`字段改为`"eager"`。
 
-使用命令如下
+转换命令如下
 
 ```bash
 # 根据实际情况修改 ascend-toolkit 路径

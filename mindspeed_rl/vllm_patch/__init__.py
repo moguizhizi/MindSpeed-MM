@@ -11,7 +11,7 @@ set_device_offset_patch()
 
 # MRotaryEmbedding_forward_patch()
 
-if vllm.__version__ == "0.7.3":
+if vllm.__version__ in ["0.7.3", "0.7.3+empty"]:
     replace_with_npu_qwen2_5_image_emb()
     replace_with_npu_qwen2_5_rope_sin_cos()
 elif vllm.__version__ in ["0.8.5.post1", "0.8.5.post1+empty"]:

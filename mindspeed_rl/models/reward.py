@@ -26,7 +26,7 @@ class Reward(BaseTrainingEngine):
             model,
             beta: float = 0,
             stage: str = None,
-            tempearture: float = 1.0,
+            temperature: float = 1.0,
             forward_backward_func: Callable = None,
             **kwargs
     ):
@@ -43,7 +43,7 @@ class Reward(BaseTrainingEngine):
     def post_process_forward_backward_output(self, output: [torch.Tensor],
                                              batch: Dict[str, torch.Tensor]) -> Tuple[
         torch.Tensor, Dict[str, torch.Tensor]]:
-        
+
         return output, batch
 
     @mstx_timer_decorator

@@ -32,7 +32,7 @@ from mindspeed.core.parallel_state import (
 from mindspeed.core.context_parallel.unaligned_cp import mapping
 
 from mindspeed_mm.utils.utils import video_to_image, change_tensor_layout
-from mindspeed_mm.models.common.normalize import normalize
+from mindspeed_mm.models.common.normalize import normalize, FP32LayerNorm
 from mindspeed_mm.models.common.embeddings.rope import RoPE3D, PositionGetter3D
 from mindspeed_mm.models.common.conv import CausalConv3d, WfCausalConv3d
 from mindspeed_mm.models.common.linear import MatmulAddLinear
@@ -827,9 +827,9 @@ class MultiHeadSparseMMAttentionSBH(MultiHeadSparseAttentionSBH):
         if qk_norm is None:
             self.norm_proj_q = None
             self.norm_proj_k = None
-        elif qk_norm == "layer_norm":
-            self.norm_proj_q = nn.LayerNorm(head_dim, eps=eps, elementwise_affine=elementwise_affine)
-            self.norm_proj_k = nn.LayerNorm(head_dim, eps=eps, elementwise_affine=elementwise_affine)
+        elif qk_norm == "fp32_layer_norm":
+            self.norm_proj_q = FP32LayerNorm(head_dim, eps=eps, sequence_parallel=True)
+            self.norm_proj_k = FP32LayerNorm(head_dim, eps=eps, sequence_parallel=True)
         elif qk_norm == "rms_norm":
             self.norm_proj_q = RMSNorm(head_dim, eps=eps, sequence_parallel=True)
             self.norm_proj_k = RMSNorm(head_dim, eps=eps, sequence_parallel=True)
@@ -837,9 +837,9 @@ class MultiHeadSparseMMAttentionSBH(MultiHeadSparseAttentionSBH):
             raise ValueError(f"Unsupported qk_norm: {qk_norm}")
 
         if qk_norm is not None and added_kv_proj_dim is not None:
-            if qk_norm == "layer_norm":
-                self.norm_added_proj_q = nn.LayerNorm(head_dim, eps=eps, elementwise_affine=elementwise_affine)
-                self.norm_added_proj_k = nn.LayerNorm(head_dim, eps=eps, elementwise_affine=elementwise_affine)
+            if qk_norm == "fp32_layer_norm":
+                self.norm_added_proj_q = FP32LayerNorm(head_dim, eps=eps, sequence_parallel=True)
+                self.norm_added_proj_k = FP32LayerNorm(head_dim, eps=eps, sequence_parallel=True)
             elif qk_norm == "rms_norm":
                 self.norm_added_proj_q = RMSNorm(head_dim, eps=eps, sequence_parallel=True)
                 self.norm_added_proj_k = RMSNorm(head_dim, eps=eps, sequence_parallel=True)
@@ -906,11 +906,12 @@ class MultiHeadSparseMMAttentionSBH(MultiHeadSparseAttentionSBH):
         dim = tokens.shape[-1]
         D_t = dim // 16 * 4
         D = dim // 16 * 6
+        origin_dtype = tokens.dtype
         t, y, x = torch.split(tokens, [D_t, D, D], dim=-1)
         t = self.apply_rope1d(t, cos_t, sin_t)
         y = self.apply_rope1d(y, cos_y, sin_y)
         x = self.apply_rope1d(x, cos_x, sin_x)
-        tokens = torch.cat((t, y, x), dim=-1)
+        tokens = torch.cat((t, y, x), dim=-1).to(origin_dtype)
         return tokens
 
     def _reverse_sparse_1d_enc(self, x):

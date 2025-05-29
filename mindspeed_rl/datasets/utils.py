@@ -6,8 +6,9 @@ import math
 import os
 import random
 from io import BytesIO
-from typing import Literal, Optional, Any, Dict, Union
+from typing import Literal, Optional, List
 
+import av
 import torch
 import numpy as np
 import torch.nn.functional as F
@@ -218,6 +219,32 @@ def process_image(image: ImageObject, max_pixels: int, min_pixels: int) -> Image
         image = image.convert("RGB")
 
     return image
+
+
+def get_video_sample_frames(video_stream: "Stream", **kwargs) -> int:
+    r"""
+    Computes video sample frames according to fps.
+    """
+    video_fps: float = kwargs.get("video_fps")
+    video_maxlen: int = kwargs.get("video_maxlen")
+    total_frames = video_stream.frames
+    sample_frames = float(video_stream.duration * video_stream.time_base) * video_fps
+    sample_frames = min(total_frames, video_maxlen, sample_frames)
+    return max(math.floor(sample_frames), 1)
+
+
+def process_videos(video, **kwargs):
+    with av.open(video, "r") as container:
+        video_stream = next(stream for stream in container.streams if stream.type == "video")
+        total_frames = video_stream.frames
+        sample_frames = get_video_sample_frames(video_stream, **kwargs)
+        sample_indices = np.linspace(0, total_frames - 1, sample_frames).astype(np.int32)
+        frames: List["ImageObject"] = []
+        container.seek(0)
+        for frame_idx, frame in enumerate(container.decode(video_stream)):
+            if frame_idx in sample_indices:
+                frames.append(process_image(frame.to_image(), 2048 * 2048, 512 * 512))
+        return frames
 
 
 def pad_sequence_to_length(tensors, max_seq_len, pad_token_id, left_pad=False):

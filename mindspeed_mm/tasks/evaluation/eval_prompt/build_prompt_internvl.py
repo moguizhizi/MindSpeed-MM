@@ -6,8 +6,8 @@ from mindspeed_mm.tasks.evaluation.eval_datasets.datasets_base import datasets_t
 
 class InternvlPromptTemplate(BasePromptTemplate):
 
-    def __init__(self, ):
-        super().__init__()
+    def __init__(self, use_custom_prompt):
+        super().__init__(use_custom_prompt)
 
     def build_prompt(self, line, dump_image: Callable, dataset_name=None):
         tgt_path = dump_image(line)

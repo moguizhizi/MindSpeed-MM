@@ -264,7 +264,7 @@ class MultiHeadLatentAttention(SelfAttention):
                 ],
                 dim=-1,
             )
-            k_pe = tensor_parallel.copy_to_tensor_model_parallel_region(k_pe)
+            
             if self.mla_up_proj_tp_overlap:
                 query, key, value = mla_up_projection_overlap_tp_comm(q_a, compressed_kv, k_pe, rotary_pos_emb,
                                                                       packed_seq_params, self)
@@ -285,6 +285,8 @@ class MultiHeadLatentAttention(SelfAttention):
                         )
                         q_pe = q_pe.view(q_len, bsz, self.num_attention_heads_per_partition, -1)
                 else:
+                    if self.config.sequence_parallel:
+                        q_a = gather_from_sequence_parallel_region(q_a)
                     q_a = tensor_parallel.scatter_to_tensor_model_parallel_region(q_a)
                     q = q_a.view(q_len, bsz, self.num_attention_heads_per_partition, -1)
                     q_nope, q_pe = torch.split(
@@ -293,6 +295,8 @@ class MultiHeadLatentAttention(SelfAttention):
 
                 if self.config.sequence_parallel:
                     k_pe = gather_from_sequence_parallel_region(k_pe)
+                else:
+                    k_pe = tensor_parallel.copy_to_tensor_model_parallel_region(k_pe)
 
                 k_pe = k_pe.view(q_len, bsz, 1, self.qk_rope_head_dim)
                 compressed_kv_norm = self.k_layernorm(compressed_kv)

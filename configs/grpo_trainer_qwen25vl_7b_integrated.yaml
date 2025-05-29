@@ -4,6 +4,7 @@ data_config:
   prompt_key: prompt
   answer_key: answer
   image_key: images
+  video_key: videos
   truncation: left
   shuffle: false
   max_pixels: 4194304
@@ -12,6 +13,9 @@ data_config:
 megatron_training:
   model: qwen2.5vl_7b
   use_fused_rmsnorm: false
+  use_dynamic_bsz: false
+  max_log_prob_seq_len_forward: 0
+  max_log_prob_seq_len_update: 0
   normalization: RMSNorm
   use_mcore_models: true
   sequence_parallel: false
@@ -92,6 +96,7 @@ rl_config:
 generate_config:
   # 多图场景最多图片数量
   limit_mm_image_per_prompt: 1
+  limit_mm_video_per_prompt: 0
 
   # tokenizer相关配置
   micro_batch_size: 32
@@ -121,3 +126,4 @@ generate_config:
     min_p: 0.0
     temperature: 1.0
     detokenize: false
+    seed: 1234

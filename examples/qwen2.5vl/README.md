@@ -3,14 +3,45 @@
 <p align="left">
 </p>
 
-[toc]
+## 目录
 
+- [环境安装](#jump1)
+  - [仓库拉取](#jump1.1)
+  - [环境搭建](#jump1.2)
+- [权重下载及转换](#jump2)
+  - [权重下载](#jump2.1)
+  - [权重转换hf2mm](#jump2.2)
+  - [权重转换mm2hf](#jump2.3)
+- [数据集准备及处理](#jump3)
+  - [数据集下载](#jump3.1)
+  - [混合数据集处理](#jump3.2)  
+- [微调](#jump4)
+  - [准备工作](#jump4.1)
+  - [配置参数](#jump4.2)
+  - [启动微调](#jump4.3)
+- [推理](#jump5)
+  - [准备工作](#jump5.1)
+  - [启动推理](#jump5.2)
+- [视频理解](#jump6)
+  - [加载数据集](#jump6.1)
+  - [配置参数](#jump6.2)
+  - [启动微调](#jump6.3)
+- [评测](#jump7)
+  - [数据集准备](#jump7.1)
+  - [配置参数](#jump7.2)
+  - [启动评测](#jump7.3)
+- [环境变量声明](#jump8)
+- [注意事项](#jump9)
+
+---
+<a id="jump1"></a>
 ## 环境安装
 
 【模型开发时推荐使用配套的环境版本】
 
 请参考[安装指南](https://gitee.com/ascend/MindSpeed-MM/blob/master/docs/features/install_guide.md)
 
+<a id="jump1.1"></a>
 #### 1. 仓库拉取
 
 ```shell
@@ -26,6 +57,7 @@ mkdir data
 mkdir ckpt
 ```
 
+<a id="jump1.2"></a>
 #### 2. 环境搭建
 
 ```bash
@@ -63,8 +95,11 @@ pip install -e .
 
 ```
 
+---
+<a id="jump2"></a>
 ## 权重下载及转换
 
+<a id="jump2.1"></a>
 #### 1. 权重下载
 
 从Huggingface库下载对应的模型权重:
@@ -76,9 +111,9 @@ pip install -e .
 
 
  将下载的模型权重保存到本地的`ckpt/hf_path/Qwen2.5-VL-7B-Instruct`目录下。
-<a id="jump2.2"></a>
 
-#### 2. 权重转换
+<a id="jump2.2"></a>
+#### 2. 权重转换(hf2mm)
 
 MindSpeed-MM修改了部分原始网络的结构名称，使用`mm-convert`工具对原始预训练权重进行转换。该工具实现了huggingface权重和MindSpeed-MM权重的互相转换以及PP（Pipeline Parallel）权重的重切分。参考[权重转换工具](https://gitee.com/ascend/MindSpeed-MM/blob/master/docs/features/权重转换工具.md)
 
@@ -123,22 +158,44 @@ mm-convert  Qwen2_5_VLConverter hf_to_mm \
 # tp_size: tp并行数量，注意要和微调启动脚本中的配置一致
 ```
 
+<a id="jump2.3"></a>
+#### 3. 权重转换(mm2hf)
+
+MindSpeed-MM修改了部分原始网络的结构名称，在微调后，如果需要将权重转回huggingface格式，可使用`mm-convert`权重转换工具对微调后的权重进行转换，将权重名称修改为与原始网络一致。
+
+```bash
+mm-convert  Qwen2_5_VLConverter mm_to_hf \
+  --cfg.save_hf_dir "ckpt/mm_to_hf/Qwen2.5-VL-7B-Instruct" \
+  --cfg.mm_dir "ckpt/mm_path/Qwen2.5-VL-7B-Instruct" \
+  --cfg.hf_config.hf_dir "ckpt/hf_path/Qwen2.5-VL-7B-Instruct" \
+  --cfg.parallel_config.llm_pp_layers [1,10,10,7] \
+  --cfg.parallel_config.vit_pp_layers [32,0,0,0] \
+  --cfg.parallel_config.tp_size 1
+# 其中：
+# save_hf_dir: mm微调后转换回hf模型格式的目录
+# mm_dir: 微调后保存的权重目录
+# hf_dir: huggingface权重目录
+# llm_pp_layers: llm在每个卡上切分的层数，注意要和微调时model.json中配置的pipeline_num_layers一致
+# vit_pp_layers: vit在每个卡上切分的层数，注意要和微调时model.json中配置的pipeline_num_layers一致
+# tp_size: tp并行数量，注意要和微调启动脚本中的配置一致
+```
 如果需要用转换后模型训练的话，同步修改`examples/qwen2.5vl/finetune_qwen2_5_vl_7b.sh`中的`LOAD_PATH`参数，该路径为转换后或者切分后的权重，注意与原始权重 `ckpt/hf_path/Qwen2.5-VL-7B-Instruct`进行区分。
 
 ```shell
 LOAD_PATH="ckpt/mm_path/Qwen2.5-VL-7B-Instruct"
 ```
 
-
+<a id="jump3"></a>
 ## 数据集准备及处理
 
+<a id="jump3.1"></a>
 #### 1. 数据集下载(以coco2017数据集为例)
 
 (1)用户需要自行下载COCO2017数据集[COCO2017](https://cocodataset.org/#download)，并解压到项目目录下的./data/COCO2017文件夹中
 
 (2)获取图片数据集的描述文件（[LLaVA-Instruct-150K](https://huggingface.co/datasets/liuhaotian/LLaVA-Instruct-150K/tree/main)），下载至./data/路径下;
 
-(3)在./data路径下新建文件mllm_format_llava_instruct_data.json，运行数据转换脚本python examples/qwen2vl/llava_instruct_2_mllm_demo_format.py;
+(3)运行数据转换脚本python examples/qwen2vl/llava_instruct_2_mllm_demo_format.py;
 
    ```
    $playground
@@ -158,6 +215,7 @@ dataset_param->basic_parameters->dataset
 
 同时注意`data.json`中`dataset_param->basic_parameters->max_samples`的配置，会限制数据只读`max_samples`条，这样可以快速验证功能。如果正式训练时，可以把该参数去掉则读取全部的数据。
 
+<a id="jump3.2"></a>
 #### 2.纯文本或有图无图混合训练数据(以LLaVA-Instruct-150K为例)
 
 现在本框架已经支持纯文本/混合数据（有图像和无图像数据混合训练）。
@@ -187,12 +245,15 @@ dataset_param->basic_parameters->dataset
 }
 ```
 
+<a id="jump4"></a>
 ## 微调
 
+<a id="jump4.1"></a>
 #### 1. 准备工作
 
 配置脚本前需要完成前置准备工作，包括：**环境安装**、**权重下载及转换**、**数据集准备及处理**，详情可查看对应章节。
 
+<a id="jump4.2"></a>
 #### 2. 配置参数
 
 【数据目录配置】
@@ -280,6 +341,7 @@ WORLD_SIZE=$(($NPUS_PER_NODE * $NNODES))
 
 同时注意，如果某张卡上的参数全部冻结时会导致没有梯度（比如`vision_encoder`冻结时PP配置`[30,2,0,0]`、`[0,11,10,7]`），需要在`finetune_qwen2_5_vl_7b.sh`中`GPT_ARGS`参数中增加`--enable-dummy-optimizer`，参考[dummy_optimizer特性文档](https://gitee.com/ascend/MindSpeed-MM/blob/master/docs/features/dummy_optimizer.md)。
 
+<a id="jump4.3"></a>
 #### 3. 启动微调
 
 以Qwen2.5VL-7B为例，启动微调训练任务。
@@ -288,28 +350,11 @@ WORLD_SIZE=$(($NPUS_PER_NODE * $NNODES))
 bash examples/qwen2.5vl/finetune_qwen2_5_vl_7b.sh
 ```
 
-## 训练后权重转回huggingface格式
-
-MindSpeed-MM修改了部分原始网络的结构名称，在微调后，如果需要将权重转回huggingface格式，可使用`mm-convert`权重转换工具对微调后的权重进行转换，将权重名称修改为与原始网络一致。
-
-```bash
-mm-convert  Qwen2_5_VLConverter mm_to_hf \
-  --cfg.save_hf_dir "ckpt/mm_to_hf/Qwen2.5-VL-7B-Instruct" \
-  --cfg.mm_dir "ckpt/mm_path/Qwen2.5-VL-7B-Instruct" \
-  --cfg.hf_config.hf_dir "ckpt/hf_path/Qwen2.5-VL-7B-Instruct" \
-  --cfg.parallel_config.llm_pp_layers [1,10,10,7] \
-  --cfg.parallel_config.vit_pp_layers [32,0,0,0] \
-  --cfg.parallel_config.tp_size 1
-# 其中：
-# save_hf_dir: mm微调后转换回hf模型格式的目录
-# mm_dir: 微调后保存的权重目录
-# hf_dir: huggingface权重目录
-# llm_pp_layers: llm在每个卡上切分的层数，注意要和微调时model.json中配置的pipeline_num_layers一致
-# vit_pp_layers: vit在每个卡上切分的层数，注意要和微调时model.json中配置的pipeline_num_layers一致
-# tp_size: tp并行数量，注意要和微调启动脚本中的配置一致
-```
+---
+<a id="jump5"></a>
 ## 推理
 
+<a id="jump5.1"></a>
 #### 1、配置参数
 
 根据实际情况修改examples/qwen2.5vl/inference_qwen2_5_vl_7b.json和examples/qwen2.5vl/inference_qwen2_5_vl_7b.sh中的路径配置，包括tokenizer的加载路径from_pretrained。需注意
@@ -318,12 +363,15 @@ mm-convert  Qwen2_5_VLConverter mm_to_hf \
 
 （2）shell文件中的LOAD_PATH的路径为经过权重转换后的模型路径(可PP切分)。
 
+<a id="jump5.2"></a>
 #### 2、启动推理
 
 ```shell
 bash examples/qwen2.5vl/inference_qwen2_5_vl_7b.sh
 ```
 
+---
+<a id="jump6"></a>
 ## Qwen2.5vl支持视频理解
 
 <a id="jump6.1"></a>
@@ -362,7 +410,7 @@ bash examples/qwen2.5vl/inference_qwen2_5_vl_7b.sh
 }
 ```
 
-
+<a id="jump6.2"></a>
 ### 2、修改模型配置
 
 在model_xxx.json中，修改`img_context_token_id`为下图所示：
@@ -371,6 +419,7 @@ bash examples/qwen2.5vl/inference_qwen2_5_vl_7b.sh
 ```
 注意， `image_token_id` 和 `img_context_token_id`两个参数作用不一样。前者是固定的，是标识图片的 token ID，在qwen2_5_vl_get_rope_index中用于计算图文输入情况下序列中的图片数量。后者是标识视觉内容的 token ID，用于在forward中标记视觉token的位置，所以需要根据输入做相应修改。
 
+<a id="jump6.3"></a>
 ### 3、启动微调
 以Qwen2.5VL-7B为例，启动微调训练任务。
 
@@ -379,8 +428,10 @@ bash examples/qwen2.5vl/finetune_qwen2_5_vl_7b.sh
 ```
 
 ---
+<a id="jump7"></a>
 ## 评测
 
+<a id="jump7.1"></a>
 ### 数据集准备
 
 当前模型支持AI2D(test)、ChartQA(test)、Docvqa(val)、MMMU(val)四种数据集的评测。
@@ -391,6 +442,7 @@ bash examples/qwen2.5vl/finetune_qwen2_5_vl_7b.sh
 - [AI2D_TEST](https://opencompass.openxlab.space/utils/VLMEval/AI2D_TEST.tsv)
 - [ChartQA_TEST](https://opencompass.openxlab.space/utils/VLMEval/ChartQA_TEST.tsv)
 
+<a id="jump7.2"></a>
 ### 参数配置
 
 如果要进行评测需要将要评测的数据集名称和路径传到examples/qwen2.5vl/evaluate_qwen2_5_vl_7b.json
@@ -428,6 +480,7 @@ LOAD_PATH="ckpt/mm_path/Qwen2.5-VL-7B-Instruct"
 NPUS_PER_NODE=1
 ```
 
+<a id="jump7.3"></a>
 ### 启动评测
 评测额外依赖一些python包，使用下面命令进行安装
 
@@ -440,6 +493,7 @@ git checkout fa56dcc2a
 pip install -e .
 ```
 
+<a id="jump7.4"></a>
 启动shell开始评测
 ```shell
 # 在MindSpeed-MM目录下执行
@@ -451,7 +505,7 @@ bash examples/qwen2.5vl/evaluate_qwen2_5_vl_7b.sh
 - *.xlsx文件，这个文件会输出每道题的预测结果和答案等详细信息。
 - *.csv文件，这个文件会输出统计准确率等数据。
 
-
+<a id="jump8"></a>
 ## 环境变量声明
 ASCEND_SLOG_PRINT_TO_STDOUT： 是否开启日志打印， 0：关闭日志打屏，1：开启日志打屏  
 ASCEND_GLOBAL_LOG_LEVEL： 设置应用类日志的日志级别及各模块日志级别，仅支持调试日志。0：对应DEBUG级别，1：对应INFO级别，2：对应WARNING级别，3：对应ERROR级别，4：对应NULL级别，不输出日志  
@@ -465,6 +519,8 @@ ACLNN_CACHE_LIMIT： 配置单算子执行API在Host侧缓存的算子信息条�
 PYTORCH_NPU_ALLOC_CONF： 控制缓存分配器行为 
 NPUS_PER_NODE： 配置一个计算节点上使用的NPU数量
 
+---
+<a id="jump9"></a>
 ## 注意事项
 
 1. 在 `finetune_xx.sh`里，与模型结构相关的参数并不生效，以`examples/qwen2.5vl/model_xb.json`里同名参数配置为准，非模型结构的训练相关参数在 `finetune_xx.sh`修改。

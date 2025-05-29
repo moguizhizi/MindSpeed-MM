@@ -235,12 +235,9 @@ class QwenMVWeightAdaptor(MegatronVLLMWeightAdaptor):
         super(QwenMVWeightAdaptor, self).__init__(model_config)
 
 
-class Qwen2VLWeightAdaptor(MegatronVLLMWeightAdaptor):
-    """
-    Megatron-vLLM WeightAdaptor for Qwen2VL model architectures.
-    """
+class Qwen2_5_VLWeightAdaptor(MegatronVLLMWeightAdaptor):
     def __init__(self, model_config):
-        super(Qwen2VLWeightAdaptor, self).__init__(model_config)
+        super(Qwen2_5_VLWeightAdaptor, self).__init__(model_config)
         self.params_mapping = [
             ("text_decoder.embedding.word_embeddings", "language_model.model.embed_tokens"),
             ("text_decoder.decoder.layers.*.self_attention.linear_qkv", "language_model.model.layers.*.self_attn.qkv_proj"),
@@ -256,8 +253,8 @@ class Qwen2VLWeightAdaptor(MegatronVLLMWeightAdaptor):
             ("image_encoder.encoder.blocks.layers.*.self_attention.linear_proj", "visual.blocks.*.attn.proj"),
             ("image_encoder.encoder.blocks.layers.*.input_layernorm", "visual.blocks.*.norm1"),
             ("image_encoder.encoder.blocks.layers.*.pre_mlp_layernorm", "visual.blocks.*.norm2"),
-            ("image_encoder.encoder.blocks.layers.*.mlp.linear_fc1", "visual.blocks.*.mlp.fc1"),
-            ("image_encoder.encoder.blocks.layers.*.mlp.linear_fc2", "visual.blocks.*.mlp.fc2"),
+            ("image_encoder.encoder.blocks.layers.*.mlp.linear_fc1", "visual.blocks.*.mlp.gate_up_proj"),
+            ("image_encoder.encoder.blocks.layers.*.mlp.linear_fc2", "visual.blocks.*.mlp.down_proj"),
             ("image_encoder.projector.layernorm", "visual.merger.ln_q"),
             ("image_encoder.projector.encoder.linear_fc1", "visual.merger.mlp.0"),
             ("image_encoder.projector.encoder.linear_fc2", "visual.merger.mlp.2"),
@@ -291,70 +288,82 @@ class Qwen2VLWeightAdaptor(MegatronVLLMWeightAdaptor):
         return inference_name
     
     @staticmethod
+    def _convert_global_to_local_index(name, layer_keyword, pp_layers):
+        """
+        Convert global layer index to local layer index for a given layer type.
+        
+        Args:
+            name: Weight name containing layer information
+            layer_keyword: Layer type keyword ('blocks' for visual, 'layers' for language model)
+            pp_layers: List of layer counts per pipeline parallel rank
+            
+        Returns:
+            Updated weight name with local layer index
+        """
+        split_name = name.split('.')
+        
+        # Find the position of layer keyword
+        layer_keyword_idx = -1
+        for i, name_part in enumerate(split_name):
+            if name_part == layer_keyword:
+                layer_keyword_idx = i
+                break
+        
+        if layer_keyword_idx == -1:
+            return name
+            
+        layer_num_idx = layer_keyword_idx + 1
+        if len(split_name) < layer_num_idx + 1 or not split_name[layer_num_idx].isdigit():
+            raise ValueError(f'Invalid {layer_keyword} name: {split_name}')
+        
+        global_idx = int(split_name[layer_num_idx])
+        
+        # Calculate local index
+        cumulative_layers = 0
+        for layers_in_pp_rank in pp_layers:
+            if layers_in_pp_rank == 0:
+                continue
+            if cumulative_layers <= global_idx < cumulative_layers + layers_in_pp_rank:
+                local_index = global_idx - cumulative_layers
+                split_name[layer_num_idx] = str(local_index)
+                return '.'.join(split_name)
+            cumulative_layers += layers_in_pp_rank
+        
+        raise ValueError(f'Could not map {layer_keyword} {global_idx} to a local index with distribution {pp_layers}')
+
+    @staticmethod
     def global2local_layer(name, num_layer_list):
+        """
+        Transform layer names from global space to local space for Qwen2VL models.
+        Supports both visual blocks and language model layers.
+        
+        Args:
+            name: Weight name to transform
+            num_layer_list: [img_pp_layers, llm_pp_layers] distribution
+            
+        Returns:
+            Transformed weight name with local layer indices
+        """
         img_pp_layers, llm_pp_layers = num_layer_list
 
         if name.startswith('visual') and 'blocks' in name:
-            split_name = name.split('.')
-            for i, name_part in enumerate(split_name):
-                if name_part == 'blocks':
-                    break
-            block_num_idx = i + 1
-            if len(split_name) < block_num_idx + 1 or not split_name[block_num_idx].isdigit():
-                raise ValueError(f'Invalid visual block name: {split_name}')
-            
-            global_idx = int(split_name[block_num_idx])
-            local_index = -1
-            
-            cumulative_layers = 0
-            for layers_in_pp_rank in img_pp_layers:
-                if layers_in_pp_rank == 0:
-                    continue
-                if cumulative_layers <= global_idx < cumulative_layers + layers_in_pp_rank:
-                    local_index = global_idx - cumulative_layers
-                    break
-                cumulative_layers += layers_in_pp_rank
-            
-            if local_index == -1:
-                raise ValueError(f'Could not map visual block {global_idx} to a local index with distribution {img_pp_layers}')
-            
-            split_name[block_num_idx] = str(local_index)
-            name = '.'.join(split_name)
-        
+            return Qwen2_5_VLWeightAdaptor._convert_global_to_local_index(name, 'blocks', img_pp_layers)
         elif name.startswith('language_model') and 'layers' in name:
-            split_name = name.split('.')
-            for i, name_part in enumerate(split_name):
-                if name_part == 'layers':
-                    break
-            layer_num_idx = i + 1
-            if len(split_name) < layer_num_idx + 1 or not split_name[layer_num_idx].isdigit():
-                raise ValueError(f'Invalid language model layer name: {split_name}')
-            
-            global_idx = int(split_name[layer_num_idx])
-            local_index = -1
-            
-            cumulative_layers = 0
-            for pp_rank, layers_in_pp_rank in enumerate(llm_pp_layers):
-                if layers_in_pp_rank == 0:
-                    continue
-                if cumulative_layers <= global_idx < cumulative_layers + layers_in_pp_rank:
-                    local_index = global_idx - cumulative_layers
-                    break
-                cumulative_layers += layers_in_pp_rank
-            
-            if local_index == -1:
-                raise ValueError(f'Could not map language model layer {global_idx} to a local index with distribution {llm_pp_layers}')
-            
-            split_name[layer_num_idx] = str(local_index)
-            name = '.'.join(split_name)
+            return Qwen2_5_VLWeightAdaptor._convert_global_to_local_index(name, 'layers', llm_pp_layers)
         
         return name
-    
+
     @staticmethod
-    def get_weight_names_per_pp(layer_list, vllm_names):
-        img_pp_layers, llm_pp_layers = layer_list
-        pp_size = len(img_pp_layers)
+    def _categorize_weights(vllm_names):
+        """
+        Categorize weight names by their types for easier processing.
         
+        Args:
+            vllm_names: List of vLLM weight names
+            
+        Returns:
+            Dictionary containing categorized weight names
+        """
         visual_weights = []
         lang_weights = []
         visual_pre_layer_weights = []
@@ -380,114 +389,131 @@ class Qwen2VLWeightAdaptor(MegatronVLLMWeightAdaptor):
                 else:
                     lang_weights.append(name)
         
-        img_blocks_range = []
-        llm_layers_range = []
+        return {
+            'visual_weights': visual_weights,
+            'lang_weights': lang_weights,
+            'visual_pre_layer_weights': visual_pre_layer_weights,
+            'visual_post_layer_weights': visual_post_layer_weights,
+            'lang_pre_layer_weights': lang_pre_layer_weights,
+            'lang_post_layer_weights': lang_post_layer_weights
+        }
+
+    @staticmethod
+    def _calculate_layer_ranges(pp_layers):
+        """
+        Calculate layer ranges for each pipeline parallel stage.
         
-        img_start_layer = 0
-        for i, layers_in_pp_rank in enumerate(img_pp_layers):
+        Args:
+            pp_layers: List of layer counts per pipeline parallel rank
+            
+        Returns:
+            List of (start_layer, end_layer) tuples for each rank
+        """
+        layer_ranges = []
+        start_layer = 0
+        for layers_in_pp_rank in pp_layers:
             if layers_in_pp_rank > 0:
-                img_blocks_range.append((img_start_layer, img_start_layer + layers_in_pp_rank - 1))
-                img_start_layer += layers_in_pp_rank
+                layer_ranges.append((start_layer, start_layer + layers_in_pp_rank - 1))
+                start_layer += layers_in_pp_rank
             else:
-                img_blocks_range.append((-1, -1))
-        
-        llm_start_layer = 0
-        for i, layers_in_pp_rank in enumerate(llm_pp_layers):
-            if layers_in_pp_rank > 0:
-                llm_layers_range.append((llm_start_layer, llm_start_layer + layers_in_pp_rank - 1))
-                llm_start_layer += layers_in_pp_rank
-            else:
-                llm_layers_range.append((-1, -1))
-        
-        weight_names_per_pp = [[] for _ in range(pp_size)]
-        
-        last_img_rank = -1
-        for i in range(pp_size-1, -1, -1):
-            if img_pp_layers[i] > 0:
-                last_img_rank = i
-                break
-        
-        first_llm_rank = -1
-        for i in range(pp_size):
-            if llm_pp_layers[i] > 0:
-                first_llm_rank = i
-                break
-        
-        for pp_rank in range(pp_size):
-            start_layer, end_layer = img_blocks_range[pp_rank]
-            
-            if start_layer == 0 and end_layer >= 0:
-                weight_names_per_pp[pp_rank].extend(visual_pre_layer_weights)
-                
+                layer_ranges.append((-1, -1))
+        return layer_ranges
+
+    @staticmethod
+    def _find_last_rank(pp_layers):
+        """
+        Find the last pipeline parallel rank that has non-zero layers.
+        """
+        for i in range(len(pp_layers) - 1, -1, -1):
+            if pp_layers[i] > 0:
+                return i
+        return -1
+
+    @staticmethod
+    def _find_first_rank(pp_layers):
+        """
+        Find the first pipeline parallel rank that has non-zero layers.
+        """
+        for i in range(len(pp_layers)):
+            if pp_layers[i] > 0:
+                return i
+        return -1
+
+    @staticmethod
+    def _assign_layer_weights(weight_names_per_pp, weights, layer_ranges, layer_keyword):
+        """
+        Assign layer weights to their corresponding pipeline parallel stages.
+        """
+        for pp_rank, (start_layer, end_layer) in enumerate(layer_ranges):
             if start_layer >= 0 and end_layer >= 0:
-                for name in visual_weights:
-                    match = re.match(r'.*\.blocks\.(\d+)', name)
-                    if match:
-                        block_num = int(match.group(1))
-                        if start_layer <= block_num <= end_layer:
-                            weight_names_per_pp[pp_rank].append(name)
-            
-            if pp_rank == last_img_rank:
-                weight_names_per_pp[pp_rank].extend(visual_post_layer_weights)
-        
-        last_llm_rank = -1
-        for i in range(pp_size-1, -1, -1):
-            if llm_pp_layers[i] > 0:
-                last_llm_rank = i
-                break
-                
-        for pp_rank in range(pp_size):
-            start_layer, end_layer = llm_layers_range[pp_rank]
-            
-            if pp_rank == first_llm_rank:
-                weight_names_per_pp[pp_rank].extend(lang_pre_layer_weights)
-                
-            if start_layer >= 0 and end_layer >= 0:
-                for name in lang_weights:
-                    match = re.match(r'.*\.layers\.(\d+)', name)
+                for name in weights:
+                    match = re.match(rf'.*\.{layer_keyword}\.(\d+)', name)
                     if match:
                         layer_num = int(match.group(1))
                         if start_layer <= layer_num <= end_layer:
                             weight_names_per_pp[pp_rank].append(name)
+
+    @staticmethod
+    def get_weight_names_per_pp(layer_list, vllm_names):
+        """
+        Get weight names for each pipeline parallel stage optimized for Qwen2VL models.
+        
+        Args:
+            layer_list: [img_pp_layers, llm_pp_layers] distribution
+            vllm_names: List of vLLM weight names
+            
+        Returns:
+            List of weight names for each pipeline parallel rank
+        """
+        img_pp_layers, llm_pp_layers = layer_list
+        pp_size = len(img_pp_layers)
+        
+        weight_categories = Qwen2_5_VLWeightAdaptor._categorize_weights(vllm_names)
+        
+        img_blocks_range = Qwen2_5_VLWeightAdaptor._calculate_layer_ranges(img_pp_layers)
+        llm_layers_range = Qwen2_5_VLWeightAdaptor._calculate_layer_ranges(llm_pp_layers)
+        
+        weight_names_per_pp = [[] for _ in range(pp_size)]
+        
+        last_img_rank = Qwen2_5_VLWeightAdaptor._find_last_rank(img_pp_layers)
+        first_llm_rank = Qwen2_5_VLWeightAdaptor._find_first_rank(llm_pp_layers)
+        last_llm_rank = Qwen2_5_VLWeightAdaptor._find_last_rank(llm_pp_layers)
+        
+        # Process visual weights
+        for pp_rank in range(pp_size):
+            start_layer, end_layer = img_blocks_range[pp_rank]
+            
+            if start_layer == 0 and end_layer >= 0:
+                weight_names_per_pp[pp_rank].extend(weight_categories['visual_pre_layer_weights'])
+            
+            if pp_rank == last_img_rank:
+                weight_names_per_pp[pp_rank].extend(weight_categories['visual_post_layer_weights'])
+        
+        # Assign visual layer weights
+        Qwen2_5_VLWeightAdaptor._assign_layer_weights(
+            weight_names_per_pp, weight_categories['visual_weights'], img_blocks_range, 'blocks'
+        )
+        
+        # Process language model weights
+        for pp_rank in range(pp_size):
+            if pp_rank == first_llm_rank:
+                weight_names_per_pp[pp_rank].extend(weight_categories['lang_pre_layer_weights'])
             
             if pp_rank == last_llm_rank:
-                weight_names_per_pp[pp_rank].extend(lang_post_layer_weights)
+                weight_names_per_pp[pp_rank].extend(weight_categories['lang_post_layer_weights'])
+        
+        # Assign language model layer weights
+        Qwen2_5_VLWeightAdaptor._assign_layer_weights(
+            weight_names_per_pp, weight_categories['lang_weights'], llm_layers_range, 'layers'
+        )
         
         return weight_names_per_pp
-
-
-class Qwen2_5_VLWeightAdaptor(Qwen2VLWeightAdaptor):
-    def __init__(self, model_config):
-        super(Qwen2_5_VLWeightAdaptor, self).__init__(model_config)
-        self.params_mapping = [
-            ("text_decoder.embedding.word_embeddings", "language_model.model.embed_tokens"),
-            ("text_decoder.decoder.layers.*.self_attention.linear_qkv", "language_model.model.layers.*.self_attn.qkv_proj"),
-            ("text_decoder.decoder.layers.*.self_attention.linear_proj", "language_model.model.layers.*.self_attn.o_proj"),
-            ("text_decoder.decoder.layers.*.input_layernorm", "language_model.model.layers.*.input_layernorm"),
-            ("text_decoder.decoder.layers.*.pre_mlp_layernorm", "language_model.model.layers.*.post_attention_layernorm"),
-            ("text_decoder.decoder.layers.*.mlp.linear_fc1", "language_model.model.layers.*.mlp.gate_up_proj"),
-            ("text_decoder.decoder.layers.*.mlp.linear_fc2", "language_model.model.layers.*.mlp.down_proj"),
-            ("text_decoder.decoder.final_layernorm", "language_model.model.norm"),
-            ("text_decoder.output_layer", "language_model.lm_head"),
-            ("image_encoder.encoder.patch_embed.proj", "visual.patch_embed.proj"),
-            ("image_encoder.encoder.blocks.layers.*.self_attention.linear_qkv", "visual.blocks.*.attn.qkv"),
-            ("image_encoder.encoder.blocks.layers.*.self_attention.linear_proj", "visual.blocks.*.attn.proj"),
-            ("image_encoder.encoder.blocks.layers.*.input_layernorm", "visual.blocks.*.norm1"),
-            ("image_encoder.encoder.blocks.layers.*.pre_mlp_layernorm", "visual.blocks.*.norm2"),
-            ("image_encoder.encoder.blocks.layers.*.mlp.linear_fc1", "visual.blocks.*.mlp.gate_up_proj"),
-            ("image_encoder.encoder.blocks.layers.*.mlp.linear_fc2", "visual.blocks.*.mlp.down_proj"),
-            ("image_encoder.projector.layernorm", "visual.merger.ln_q"),
-            ("image_encoder.projector.encoder.linear_fc1", "visual.merger.mlp.0"),
-            ("image_encoder.projector.encoder.linear_fc2", "visual.merger.mlp.2"),
-        ]
 
 
 WEIGHT_ADAPTOR_REGISTRY = {
     "Qwen2ForCausalLM": QwenMVWeightAdaptor,
     "DeepseekV3ForCausalLM": DeepSeekMVWeightAdaptor,
     "DeepseekV2ForCausalLM": DeepSeekMVWeightAdaptor,
-    "Qwen2VLForConditionalGeneration": Qwen2VLWeightAdaptor,
-    "CustomQwen2VLForConditionalGeneration": Qwen2VLWeightAdaptor,
     "Qwen2_5_VLForConditionalGeneration": Qwen2_5_VLWeightAdaptor,
 }
 

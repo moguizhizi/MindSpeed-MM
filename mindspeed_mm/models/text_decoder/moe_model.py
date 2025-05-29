@@ -27,7 +27,6 @@ from megatron.training.global_vars import get_args
 
 from mindspeed.core.context_parallel.unaligned_cp.mapping import cal_split_sizes, split_forward_gather_backward, gather_forward_split_backward
 from mindspeed.core.tensor_parallel.random import CheckpointWithoutOutput
-from mindspeed.core.transformer.transformer_block import NoopTransformerLayer, _get_layer_offset
 from mindspeed.core.transformer.transformer import norm_recompute_forward
 from mindspeed.model.transformer import should_recompute_norm
 from mindspeed.utils import set_actual_seq_len
@@ -354,7 +353,6 @@ class MOETransformerBlock(TransformerBlock):
         use_te = False
 
         def build_layer(layer_spec, layer_number):
-            global_layer_number = _get_layer_offset(self.config) + layer_number
             ffn_hidden_size = self.config.ffn_hidden_size
             # For deepseek
             if (
@@ -363,8 +361,8 @@ class MOETransformerBlock(TransformerBlock):
                     and self.config.moe_layer_freq is not None
             ):
                 if (
-                        (global_layer_number - 1) >= self.config.first_k_dense_replace
-                        and (global_layer_number - 1) % self.config.moe_layer_freq == 0
+                        (layer_number - 1) >= self.config.first_k_dense_replace
+                        and (layer_number - 1) % self.config.moe_layer_freq == 0
                 ):
                     self.config.ffn_hidden_size = self.config.moe_intermediate_size
                     layer_spec.submodules.mlp = get_mlp_module_spec(use_te=use_te, num_experts=self.config.num_moe_experts,
@@ -399,8 +397,6 @@ class MOETransformerBlock(TransformerBlock):
         # For recompute norm
         if args.recompute_norm:
             for layer in self.layers:
-                if isinstance(layer, NoopTransformerLayer):
-                    continue
                 # 1F1B overlap has its own implementation for recompute_norm
                 if should_recompute_norm(layer) and not args.moe_fb_overlap:
                     layer.forward = types.MethodType(norm_recompute_forward, layer)

@@ -45,5 +45,5 @@ class Reference(BaseTrainingEngine):
         return output, batch
 
     @mstx_timer_decorator
-    def compute_log_prob(self, data: Dict) -> (Tensor, Dict):
-        return super().forward(data)
+    def compute_log_prob(self, data: Dict, llm_only: bool = True) -> (Tensor, Dict):
+        return super().forward(data, llm_only=llm_only)

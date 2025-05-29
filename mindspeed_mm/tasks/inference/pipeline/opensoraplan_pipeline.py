@@ -3,6 +3,7 @@ import math
 import inspect
 
 import torch
+import torch.nn as nn
 
 from mindspeed_mm.tasks.inference.pipeline.pipeline_base import MMPipeline
 from mindspeed_mm.tasks.inference.pipeline.pipeline_mixin.encode_mixin import MMEncoderMixin
@@ -16,8 +17,6 @@ from mindspeed_mm.tasks.inference.pipeline.utils.sora_utils import get_pixel_val
 class OpenSoraPlanPipeline(MMPipeline, InputsCheckMixin, MMEncoderMixin):
 
     def __init__(self, vae, text_encoder, tokenizer, scheduler, predict_model, config=None):
-        self.register_modules(tokenizer=tokenizer, text_encoder=text_encoder, vae=vae, scheduler=scheduler,
-                              predict_model=predict_model)
 
         self.vae = vae
         self.text_encoder = text_encoder
@@ -52,6 +51,7 @@ class OpenSoraPlanPipeline(MMPipeline, InputsCheckMixin, MMEncoderMixin):
                  added_cond_kwargs: dict = None,
                  use_prompt_template: bool = True,
                  use_prompt_preprocess: bool = True,
+                 device: torch.device = "npu",
                  **kwargs,
                  ):
 
@@ -102,23 +102,54 @@ class OpenSoraPlanPipeline(MMPipeline, InputsCheckMixin, MMEncoderMixin):
         else:
             batch_size = prompt_embeds.shape[0]
 
-        device = self.text_encoder.device or self._execution_device
-
-        self.do_classifier_free_guidance = guidance_scale > 1.0
+        do_classifier_free_guidance = guidance_scale > 1.0
 
         # 3. Encode input prompt
-        prompt_embeds, prompt_embeds_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = self.encode_texts(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            device=device,
-            do_classifier_free_guidance=self.do_classifier_free_guidance,
-            max_length=max_sequence_length,
-            clean_caption=clean_caption,
-            use_prompt_preprocess=use_prompt_preprocess)
+        # single text encoder
+        if not isinstance(self.tokenizer, list):
+            prompt_embeds, prompt_embeds_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = self.encode_texts(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                device=device,
+                do_classifier_free_guidance=do_classifier_free_guidance,
+                max_length=max_sequence_length,
+                clean_caption=clean_caption,
+                use_prompt_preprocess=use_prompt_preprocess
+            )
+        
+        # multi text encoder
+        else:        
+            prompt_embeds, prompt_embeds_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = [], [], [], []
+            for tokenizer, text_encoder in zip(self.tokenizer, self.text_encoder):
+                prompt_embed, attention_mask, negative_prompt_embed, negative_attention_mask = self.encode_texts(
+                    tokenizer=tokenizer,
+                    text_encoder=text_encoder,
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    device=device,
+                    do_classifier_free_guidance=do_classifier_free_guidance,
+                    max_length=tokenizer.model_max_length,
+                    clean_caption=clean_caption,
+                    use_prompt_preprocess=use_prompt_preprocess
+                )
+                prompt_embeds.append(prompt_embed)
+                prompt_embeds_attention_mask.append(attention_mask)
+                negative_prompt_embeds.append(negative_prompt_embed)
+                negative_prompt_attention_mask.append(negative_attention_mask)
 
-        if self.do_classifier_free_guidance:
-            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-            prompt_embeds_attention_mask = torch.cat([negative_prompt_attention_mask, prompt_embeds_attention_mask],
+        if do_classifier_free_guidance:
+            if isinstance(prompt_embeds, list):
+                prompt_embeds = [
+                    torch.cat([negative_prompt_embed, prompt_embed], dim=0) 
+                    for negative_prompt_embed, prompt_embed in zip(negative_prompt_embeds, prompt_embeds)
+                ]
+                prompt_embeds_attention_mask = [
+                    torch.cat([negative_attention_mask, attention_mask], dim=0)
+                    for negative_attention_mask, attention_mask in zip(negative_prompt_attention_mask, prompt_embeds_attention_mask)
+                ]
+            else:
+                prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+                prompt_embeds_attention_mask = torch.cat([negative_prompt_attention_mask, prompt_embeds_attention_mask],
                                                      dim=0)
         if self.model_type == "i2v":
             masked_pixel_values, mask = self.get_masked_pixel_values_mask(
@@ -148,18 +179,26 @@ class OpenSoraPlanPipeline(MMPipeline, InputsCheckMixin, MMEncoderMixin):
             math.ceil(int(self.height) / self.vae.vae_scale_factor[1]),
             math.ceil(int(self.width) / self.vae.vae_scale_factor[2]),
         )
-        latents = self.prepare_latents(shape, generator=generator, device=device, dtype=prompt_embeds.dtype,
-                                       latents=latents)
+        latents = self.prepare_latents(
+            shape, 
+            generator=generator, 
+            device=device, 
+            dtype=prompt_embeds[0].dtype 
+            if isinstance(prompt_embeds, list) else prompt_embeds.dtype,
+            latents=latents
+        )
+
         # 6 prepare extra step kwargs
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
         # 6.1 Prepare micro-conditions.
         added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
 
-        if prompt_embeds.ndim == 3:
-            prompt_embeds = prompt_embeds.unsqueeze(1)  # b l d -> b 1 l d
-        if prompt_embeds_attention_mask.ndim == 2:
-            prompt_embeds_attention_mask = prompt_embeds_attention_mask.unsqueeze(1)  # b l -> b 1 l
+        if not isinstance(prompt_embeds, list):
+            if prompt_embeds.ndim == 3:
+                prompt_embeds = prompt_embeds.unsqueeze(1)  # b l d -> b 1 l d
+            if prompt_embeds_attention_mask.ndim == 2:
+                prompt_embeds_attention_mask = prompt_embeds_attention_mask.unsqueeze(1)  # b l -> b 1 l
         model_kwargs = {"prompt": prompt_embeds,
                         "added_cond_kwargs": added_cond_kwargs,
                         "enable_temporal_attentions": enable_temporal_attentions,
@@ -209,6 +248,19 @@ class OpenSoraPlanPipeline(MMPipeline, InputsCheckMixin, MMEncoderMixin):
             nsfw, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, 
             low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry.
             """
+        elif self.version == "v1.5":
+            positive_template = """
+            high quality, {}
+            """
+
+            negative_template = """
+            Worst quality, Normal quality, Low quality, Low res, Blurry, Jpeg artifacts, Grainy, watermark, banner, 
+            Cropped, Out of frame, Out of focus, Bad anatomy, Bad proportions, Deformed, Disconnected limbs, Disfigured, 
+            username, error, sketch, duplicate, ugly, monochrome, horror, geometry, mutation, disgusting, overexposed, underexposed.
+            """
+        else:
+            positive_template = "{}"
+            negative_template = "{}"
 
         if isinstance(positive_prompt, (list, tuple)):
             for positive_prompt_i in positive_prompt:
@@ -277,8 +329,8 @@ class OpenSoraPlanPipeline(MMPipeline, InputsCheckMixin, MMEncoderMixin):
         mask = self.mask_compressor(mask)
 
         masked_pixel_values = torch.cat(
-            [masked_pixel_values] * 2) if self.do_classifier_free_guidance else masked_pixel_values
-        mask = torch.cat([mask] * 2) if self.do_classifier_free_guidance else mask
+            [masked_pixel_values] * 2) if do_classifier_free_guidance else masked_pixel_values
+        mask = torch.cat([mask] * 2) if do_classifier_free_guidance else mask
 
         masked_pixel_values = masked_pixel_values.to(weight_dtype)
         mask = mask.to(weight_dtype)

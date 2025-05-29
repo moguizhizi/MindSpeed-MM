@@ -133,7 +133,6 @@ class MMEncoderMixin:
             if use_prompt_preprocess and isinstance(self, InputsCheckMixin):
                 uncond_tokens = self.preprocess_text(uncond_tokens, clean_caption)
 
-            max_length = prompt_embeds.shape[1]
             uncond_input = tokenizer(
                 uncond_tokens,
                 padding="max_length",

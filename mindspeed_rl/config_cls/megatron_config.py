@@ -176,6 +176,9 @@ class MegatronConfig(BaseConfig):
     num_layer_list: a list of number of layers, seperated by comma; e.g., 4,4,4,4 (default: None)
     dataset_additional_keys: Additional keys need to be add from dataset (default: [])
     mm_dataset_additional_keys: Additional keys need to be add from multimodal dataset (default: [])
+    use_dynamic_bsz: Use dynamic batch size (default: False)
+    max_log_prob_seq_len_forward: Maximum sequence length for forward/logp (default: 0)
+    max_log_prob_seq_len_update: Maxumum sequence length for update (default: 0)
 
     inference_parameters:
     use_kv_cache: Use kv cache to accelerate inference
@@ -242,6 +245,9 @@ class MegatronConfig(BaseConfig):
         self.group_query_attention = False
         self.num_query_groups = 1
         self.untie_embeddings_and_output_weights = False
+        self.use_dynamic_bsz = False
+        self.max_log_prob_seq_len_forward = 0
+        self.max_log_prob_seq_len_update = 0
 
         self.multi_head_latent_attention = False
         self.qk_rope_head_dim = None

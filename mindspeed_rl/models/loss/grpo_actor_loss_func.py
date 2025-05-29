@@ -35,12 +35,17 @@ class GRPOActorLossFunc(BaseLossFunc):
 
     def compute_loss(self, output: torch.Tensor,
                      batch: Dict[str, torch.Tensor],
-                     forward_only=False, non_loss_data=True) -> Tuple[torch.Tensor, Dict]:
+                     forward_only=False, 
+                     max_log_prob_seq_len=0,
+                     config_micro_batch_size=1,
+                     non_loss_data=True) -> Tuple[torch.Tensor, Dict]:
         """
         计算损失函数，子类必须实现。
         :param output: 模型的输出 logits。
         :param batch: 输入数据，包含 responses、attention_mask 等。
         :param forward_only
+        :param max_log_prob_seq_len 最大的log_prob长度
+        :param config_micro_batch_size update的微批量大小
         :return: 损失值和统计信息。
         """
         # compute log probs
@@ -59,7 +64,10 @@ class GRPOActorLossFunc(BaseLossFunc):
                                                                       eos_mask=response_mask,
                                                                       cliprange=self.clip_ratio,
                                                                       kl_ctrl=self.kl_ctrl)
-        policy_loss = pg_loss
+        if max_log_prob_seq_len and not forward_only:
+            policy_loss = pg_loss * (batch["responses"].size(0) / config_micro_batch_size)
+        else:
+            policy_loss = pg_loss
         stats = {
             'actor/pg_loss': abs(pg_loss.detach().item()),
             'actor/pg_clipfrac': pg_clipfrac.detach().item(),
@@ -110,6 +118,7 @@ class GRPOActorLossFunc(BaseLossFunc):
         ref_approx_kl = ref_log_prob - log_prob
         ratio_kl = torch.exp(ref_approx_kl)
         kl_losses = ratio_kl - ref_approx_kl - 1
+        kl_losses = torch.clamp(kl_losses.contiguous(), min=-10, max=10) # 精度对齐verl实现
         kl_mean_loss = F.masked_mean(kl_losses, eos_mask)
         kl_loss = kl_mean_loss * kl_ctrl.value
         pg_loss = pg_mean_loss + kl_mean_loss * kl_ctrl.value

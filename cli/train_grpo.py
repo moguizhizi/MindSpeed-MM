@@ -48,11 +48,15 @@ def train(config):
     import os
     import debugpy
 
-    if os.environ.get("DEBUG_THIS_WORKER") == "1":
-        debugpy.listen(("0.0.0.0", 5678))
-        print("Waiting for debugger to attach...")
-        debugpy.wait_for_client()
-        
+    # if os.environ.get("DEBUG_THIS_WORKER") == "1":
+    #     debugpy.listen(("0.0.0.0", 5678))
+    #     print("Waiting for debugger to attach...")
+    #     debugpy.wait_for_client()
+    
+    # debugpy.listen(("0.0.0.0", 5678))
+    # print("Waiting for debugger to attach...")
+    # debugpy.wait_for_client()
+    
     actor_config = configs["actor_config"]
     ref_config = configs["ref_config"]
     reward_config = configs["reward_config"]
@@ -67,6 +71,9 @@ def train(config):
     processor = get_processor(model_path=actor_config.tokenizer_name_or_path, use_fast=True)
 
     logger.info('start async initializing ray actor groups')
+    
+    # breakpoint()
+
 
     if rl_config.use_integrated_worker:
         integrated_worker = RayActorGroup(
@@ -139,6 +146,7 @@ def train(config):
         processor=processor,
         prompt_key=data_config.prompt_key,
         image_key=data_config.image_key,
+        video_key=data_config.video_key,
         max_prompt_length=rl_config.max_prompt_length,
         filter_prompts=True,
         return_raw_chat=data_config.return_raw_chat,
@@ -438,11 +446,9 @@ def main(config):
         with open(os.path.join(cur_file_dir, rl_config.runtime_env_path)) as file:
             runtime_env = yaml.safe_load(file)
         logger.info(f"ray init with runtime_env: {runtime_env}")
-        ray.init(runtime_env=runtime_env, log_to_driver=True)
+        ray.init(runtime_env=runtime_env)
 
-    # ray.get(train.remote(config))
-    ray.get(train.remote(config))  # 注释掉
-    # train(config)  # 直接调用
+    ray.get(train.remote(config))
 
 
 if __name__ == '__main__':

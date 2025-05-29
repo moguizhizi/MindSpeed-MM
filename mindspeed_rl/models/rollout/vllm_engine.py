@@ -22,7 +22,7 @@ def dummy_compile(*compile_args, **compile_kwargs):
         return wrapper
 
     return decorate
-    
+
 
 torch.jit.script = dummy_compile
 torch.compile = dummy_compile
@@ -65,7 +65,8 @@ class VLLMInferEngine(BaseInferEngine):
             gpu_memory_utilization: float = 0.5,
             trust_remote_code: bool = True,
             load_format: str = "megatron",
-            limit_mm_image_per_prompt: int = 999,
+            limit_mm_image_per_prompt: int = 1,
+            limit_mm_video_per_prompt: int = 0,
             **kwargs
     ):
         """
@@ -114,12 +115,13 @@ class VLLMInferEngine(BaseInferEngine):
                 n=sampling_config.get('num_completions', 1),
                 logprobs=sampling_config.get('logprobs', 1),
                 max_tokens=sampling_config.get('max_tokens', 128),
-                best_of=sampling_config.get('best_of', 2),
+                # best_of=sampling_config.get('best_of', 2),
                 top_p=sampling_config.get('top_p', 1.0),
                 top_k=sampling_config.get('top_k', 50),
                 min_p=sampling_config.get('min_p', 0.0),
                 temperature=sampling_config.get('temperature', 0.2),
-                detokenize=sampling_config.get('detokenize', False)
+                detokenize=sampling_config.get('detokenize', False),
+                seed=sampling_config.get('seed', None)
             )
         except Exception as e:
             raise ValueError(f"Error creating SamplingParams from dictionary") from e
@@ -156,6 +158,12 @@ class VLLMInferEngine(BaseInferEngine):
         torch.jit.script = dummy_compile
         torch.compile = dummy_compile
 
+        limit_mm_per_prompt_dict = {}
+        if limit_mm_image_per_prompt > 0:
+            limit_mm_per_prompt_dict['image'] = limit_mm_image_per_prompt
+        if limit_mm_video_per_prompt > 0:
+            limit_mm_per_prompt_dict['video'] = limit_mm_video_per_prompt
+
         # Initialize the LLM engine
         self.llm = LLM(
             model=tokenizer_name_or_path,
@@ -171,8 +179,8 @@ class VLLMInferEngine(BaseInferEngine):
             gpu_memory_utilization=gpu_memory_utilization,
             max_num_seqs=max_num_seqs,
             max_model_len=max_model_len,
-            seed=1234,
-            limit_mm_per_prompt={'image': limit_mm_image_per_prompt}
+            seed=self.sampling_config.get('seed', None),
+            limit_mm_per_prompt=limit_mm_per_prompt_dict
         )
 
         self.model = self.llm.llm_engine.model_executor.driver_worker.worker.model_runner.get_model()
@@ -252,11 +260,23 @@ class VLLMInferEngine(BaseInferEngine):
     def generate_sequences(self, prompts, images,**kwargs):
         self.init_cache_engine()
         if "vit_embeds" in images:
-            prompts = [{"prompt_token_ids": prompt, 
+            prompts = [{"prompt_token_ids": prompt,
                         "multi_modal_data": {"image_embeds": image_embeds, "image_grid_thw": grid_thw}}
-                        for prompt, image_embeds, grid_thw in zip(prompts, images['vit_embeds'], images['image_grid_thw'])]
+                       for prompt, image_embeds, grid_thw in
+                       zip(prompts, images['vit_embeds'], images['image_grid_thw'])]
+            if torch.sum(images['video_num']).item() > 0:
+                from megatron.training import get_args
+                # replace video_token_id with image_token_id when using vit_embeds
+                for p in prompts:
+                    p['prompt_token_ids'] = list(map(lambda x: get_args().mm.model.image_token_id if x == get_args().mm.model.video_token_id else x, p['prompt_token_ids']))
         else:
-            prompts = [{"prompt_token_ids": prompt, "multi_modal_data": {"image": image}} for prompt, image in zip(prompts, images['image'])]
+            if torch.sum(images['image_num']).item() > 0:
+                prompts = [{"prompt_token_ids": prompt, "multi_modal_data": {"image": image}} for prompt, image in
+                           zip(prompts, images['image'])]
+            else:
+                prompts = [{"prompt_token_ids": prompt, "multi_modal_data": {"video": video},
+                            'mm_processor_kwargs': {'fps': fps.squeeze().tolist()}} for prompt, video, fps in
+                           zip(prompts, images['video'], images['video_fps'])]
 
         with self.update_sampling_params(**kwargs):
             response = self.llm.generate(

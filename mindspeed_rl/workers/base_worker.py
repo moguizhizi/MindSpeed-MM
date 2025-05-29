@@ -47,7 +47,6 @@ class BaseRayWorker:
         self._world_size = int(os.environ.get("WORLD_SIZE", 1))
         self._rank = int(os.environ.get("RANK", 0))
         self._local_rank = int(ray.get_runtime_context().get_accelerator_ids()["NPU"][0])
-        
         torch.npu.set_device(self._local_rank-int(os.environ.get("DEVICES_OFFSET",0)))
         current_device = torch.npu.current_device()
         if os.environ.get("MASTER_ADDR", 0) == "localhost":
@@ -238,17 +237,6 @@ class BaseWorker(BaseRayWorker, ABC):
                                     use_vllm=False, indexes=None,
                                     get_n_samples=True):
         pad_id = self.tokenizer.pad if self.tokenizer.pad else self.tokenizer.eod
-        
-        
-        # print(f"experience_consumer_stage:{experience_consumer_stage}")
-        # print(f"experience_columns:{experience_columns}")
-        # print(f"experience_count:{experience_count}")
-        # print(f"tp_size:{tp_size}")
-        # print(f"use_vllm:{use_vllm}")
-        # print(f"indexes:{indexes}")
-        # print(f"get_n_samples:{get_n_samples}")
-        
-        # exit(0)
 
         mm_columns = ray.get(self.mm_td.get_columns.remote(experience_consumer_stage))
         batch_data = {}
@@ -261,12 +249,6 @@ class BaseWorker(BaseRayWorker, ABC):
             batch_data, index = ray.get(self.td.get_experience.remote(experience_consumer_stage, experience_columns,
                                                                       experience_count, indexes=indexes,
                                                                       get_n_samples=get_n_samples))  # cpu数据
-            
-            # print(f"batch_data:{batch_data}")
-            # print(f"index:{index}")
-            
-            # exit(0)
-            
             if not index:  # 判断是否取出数据，未取出数据为-1
                 index = [-1] * experience_count
             else:

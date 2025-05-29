@@ -27,6 +27,21 @@ DIT_CONVERT_MAPPING = {
     "proj_out.weight": "proj_out.weight"
 }
 
+first_pipeline_stage_keys = [
+    "pos_embed.proj.bias", "pos_embed.proj.weight",
+    "adaln_single.emb.timestep_embedder.linear_1.bias", "adaln_single.emb.timestep_embedder.linear_1.weight",
+    "adaln_single.emb.timestep_embedder.linear_2.bias", "adaln_single.emb.timestep_embedder.linear_2.weight",
+    "adaln_single.linear.weight", "adaln_single.linear.bias",
+    "caption_projection.linear_1.bias", "caption_projection.linear_1.weight",
+    "caption_projection.linear_2.bias", "caption_projection.linear_2.weight",
+    "clip_projection.bias", "clip_projection.weight"
+]
+
+last_pipeline_stage_keys = [
+    "scale_shift_table",
+    "proj_out.bias", "proj_out.weight"
+]
+
 
 def get_layer_mapping(i: int) -> Dict:
     layer_mapping = {}
@@ -75,8 +90,6 @@ def update_state_dict_inplace(
 
 
 def split_by_tp(state_dict: Dict[str, Any], tp_size: int = 2, num_layers: int = 48, num_heads: int = 48) -> List[Dict]:
-    if tp_size <= 1:
-        return [state_dict, ]
     
     num_heads_per_tp = num_heads // tp_size
     new_state_dicts = []
@@ -128,24 +141,61 @@ def split_by_tp(state_dict: Dict[str, Any], tp_size: int = 2, num_layers: int = 
                 new_state_dict[split_name] = weight.clone()
         # adaLN modulation
         col_split_names = [
+            "adaln_single.linear.weight",
             "adaln_single.linear.bias",
-            "adaln_single.linear.weight"
         ]
         for split_name in col_split_names:
             new_state_dict[split_name] = torch.chunk(state_dict[split_name], tp_size, dim=0)[tp_rank].clone()
         
         new_state_dicts.append(new_state_dict)
-    
-    res_state_dict = {}
-    for tp_rank, state_dict in enumerate(new_state_dicts):
-        res_state_dict[(0, tp_rank)] = state_dict
 
-    return res_state_dict
+    return new_state_dicts
 
 
-def merge_by_tp(state_dicts: Dict[str, Any], num_layers: int, tp_size: int, is_last_pp_stage: bool):
-    if tp_size == 1:
-        return state_dicts[0]
+def split_by_pp(state_dicts: List[Dict[str, Any]], pp_sizes: List) -> Dict[tuple, Dict]:
+    if len(pp_sizes) == 1:
+        new_state_dicts = {}
+        for tp_rank, state_dict in enumerate(state_dicts):
+            new_state_dicts[(0, tp_rank)] = state_dict
+        return new_state_dicts
+
+    new_state_dicts = {}
+    for pp_rank, _ in enumerate(pp_sizes):
+        start_layer_index, end_layer_index = sum(pp_sizes[:pp_rank]), sum(pp_sizes[:pp_rank + 1])
+        is_pipeline_first_stage = pp_rank == 0
+        is_pipeline_last_stage = pp_rank == len(pp_sizes) - 1
+
+        for tp_rank, state_dict in enumerate(state_dicts):
+            pp_tp_param = dict()
+
+            for i in range(start_layer_index, end_layer_index):
+                layer_names = get_layer_mapping(i).values()
+                pp_layer_names = get_layer_mapping(i - start_layer_index).values()
+
+                for pp_layer_name, layer_name in zip(pp_layer_names, layer_names):
+                    if layer_name in state_dict:
+                        pp_tp_param[pp_layer_name] = state_dict[layer_name]
+                    else:
+                        print(f"Warning: missing param key {layer_name}")
+
+            if is_pipeline_first_stage:
+                for layer_name in first_pipeline_stage_keys:
+                    if layer_name in state_dict:
+                        pp_tp_param[layer_name] = state_dict[layer_name]
+                    else:
+                        print(f"Warning: missing pp first stage key {layer_name}")
+            if is_pipeline_last_stage:
+                for layer_name in last_pipeline_stage_keys:
+                    if layer_name in state_dict:
+                        pp_tp_param[layer_name] = state_dict[layer_name]
+                    else:
+                        print(f"Warning: missing pp last stage key {layer_name}")
+            new_state_dicts[(pp_rank, tp_rank)] = pp_tp_param
+
+    return new_state_dicts
+
+
+def merge_by_tp(state_dicts: Dict[str, Any], num_layers: int, tp_size: int, is_first_pp_stage: bool):
     
     merged_state_dict = copy.deepcopy(state_dicts[0])
     for index in range(num_layers):
@@ -193,7 +243,48 @@ def merge_by_tp(state_dicts: Dict[str, Any], num_layers: int, tp_size: int, is_l
             wv = torch.cat(wv, dim=0)
             wkv = torch.cat([wk, wv], dim=0)
             merged_state_dict[name] = wkv
+        
+        if is_first_pp_stage:
+            # adaLN modulation
+            col_split_names = [
+                "adaln_single.linear.weight",
+                "adaln_single.linear.bias",
+            ]
+            for split_name in col_split_names:
+                merged_state_dict[split_name] = torch.cat(
+                    [state_dicts[tp_rank][split_name] for tp_rank in range(tp_size)])
 
+    return merged_state_dict
+
+
+def merge_by_pp(state_dicts: Dict[str, Any], pp_sizes: list):
+    if len(pp_sizes) == 1:
+        merged_state_dict = {}
+        for tp_rank, state_dict in enumerate(state_dicts):
+            merged_state_dict[(0, tp_rank)] = state_dict
+        return merged_state_dict
+    
+    merged_state_dict = {}
+    for key in first_pipeline_stage_keys:
+        if key in state_dicts[0]:
+            merged_state_dict[key] = state_dicts[0][key]
+        else:
+            print(f"Warning: missing pp first stage key {key}")
+    for i, pp_size in enumerate(pp_sizes):
+        for layer_index in range(pp_size):
+            pp_layer_names = get_layer_mapping(layer_index).values()
+            layer_names = get_layer_mapping(layer_index + sum(pp_sizes[:i])).values()
+            for pp_layer_name, layer_name in zip(pp_layer_names, layer_names):
+                if pp_layer_name in state_dicts[i]:
+                    merged_state_dict[layer_name] = state_dicts[i][pp_layer_name]
+                else:
+                    print(f"Warning: missing pp layer key {pp_layer_name}")
+    for key in last_pipeline_stage_keys:
+        if key in state_dicts[-1]:
+            merged_state_dict[key] = state_dicts[-1][key]
+        else:
+            print(f"Warning: missing pp last stage key {key}")
+    merged_state_dict = {(0, 0): merged_state_dict}
     return merged_state_dict
 
 
@@ -217,11 +308,12 @@ def merge_by_tp_pp(train_save_dir: str, save_path: str, tp_size: int, pp_sizes: 
             else:
                 state_dict_path = os.path.join(train_save_dir, directory, f"mp_rank_{tp_rank:02d}", "model_optim_rng.pt")
             _tp_state_dicts.append(torch.load(state_dict_path, map_location=torch.device("cpu"))['model'])
-        is_last_pp_stage = pp_rank == len(pp_sizes) - 1
-        merged_tp_state_dict = merge_by_tp(_tp_state_dicts, num_layers=pp_sizes[pp_rank], tp_size=tp_size, is_last_pp_stage=is_last_pp_stage)
+        is_first_pp_stage = pp_rank == 0
+        merged_tp_state_dict = merge_by_tp(_tp_state_dicts, num_layers=pp_sizes[pp_rank], tp_size=tp_size, is_first_pp_stage=is_first_pp_stage)
         _pp_state_dicts.append(merged_tp_state_dict)
+    merged_state_dict = merge_by_pp(_pp_state_dicts, pp_sizes=pp_sizes)
 
-    save_by_tp_pp(_pp_state_dicts[0], save_path, len(pp_sizes) > 1)
+    save_by_tp_pp(merged_state_dict, save_path, len(pp_sizes) > 1)
     return 
 
 
@@ -236,7 +328,7 @@ def save_by_tp_pp(state_dicts: Dict[tuple, Dict], save_dir: str, enable_pp: bool
     if latest_checkpointed_iteration == 'release':
         directory = 'release'
     else:
-        directory = 'iter_{:07d}'.format(latest_checkpointed_iteration)
+        directory = 'iter_{:07d}'.format(int(latest_checkpointed_iteration))
 
     for (pp_rank, tp_rank), state_dict in state_dicts.items():
         if enable_pp:
@@ -269,9 +361,6 @@ def get_args():
 if __name__ == "__main__":
     args = get_args()
 
-    if len(args.pp_sizes) > 1:
-        raise ValueError("Pipeline parallel for StepVideo is coming soon!")
-
     if args.mode == "split":
         source_state_dict = load_from_hf(args.source_path)
         
@@ -281,6 +370,7 @@ if __name__ == "__main__":
         update_state_dict_inplace(source_state_dict, DIT_CONVERT_MAPPING)
 
         state_dicts = split_by_tp(source_state_dict, tp_size=args.tp_size, num_layers=args.num_layers, num_heads=args.num_heads)
+        state_dicts = split_by_pp(state_dicts, pp_sizes=args.pp_sizes)
         save_by_tp_pp(state_dicts, args.target_path, enable_pp=len(args.pp_sizes) > 1)
 
     elif args.mode == "merge":

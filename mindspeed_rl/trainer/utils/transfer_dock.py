@@ -644,13 +644,17 @@ class MMGRPOTransferDock(TransferDock):
                  timeout_interval: Union[int, None] = None) -> None:
         self.experience_columns = [
             'image',
-            'pixel_values',
-            'image_grid_thw',
+            'pixel_values',  # 'pixel_values_videos'
+            'image_grid_thw',  # 'video_grid_thw
             'image_shape',
             'labels',
             'vit_embeds',
             'position_ids',
             'image_num',
+            'video',
+            'video_shape',
+            'video_fps',
+            'video_num'
         ]
         super().__init__(
             prompts_num,
@@ -662,17 +666,18 @@ class MMGRPOTransferDock(TransferDock):
         
         self.n_samples_per_prompt = n_samples_per_prompt
         self.consumer_columns = {
-            "actor_rollout": ["image", "image_shape", "image_num"],
-            "actor_log_prob": ["pixel_values", "image_grid_thw", "image_num"],
-            "ref_log_prob": ["pixel_values", "image_grid_thw", "image_num"],
-            "actor_train": ["pixel_values", "image_grid_thw", "image_num"],
+            "actor_rollout": ["image", "image_shape", "image_num", "video", "video_shape", "video_fps", "video_num"],
+            "actor_log_prob": ["pixel_values", "image_grid_thw", "image_num", "video_num"],
+            "ref_log_prob": ["pixel_values", "image_grid_thw", "image_num", "video_num"],
+            "actor_train": ["pixel_values", "image_grid_thw", "image_num", "video_num"],
             "rule_reward": ["labels"],
         }
 
         if reuse_image_embeds:
-            self.consumer_columns["actor_image_embeds"] = ["pixel_values", "image_grid_thw", "image_num"]
-            self.consumer_columns["actor_rollout"] = ["vit_embeds", "image_grid_thw", "image_num"]
-            self.consumer_columns["actor_log_prob"] = ["vit_embeds", "image_grid_thw", "image_num"]
+            self.consumer_columns["actor_image_embeds"] = ["pixel_values", "image_grid_thw", "image_num", "video_num"]
+            self.consumer_columns["actor_rollout"] = ["vit_embeds", "image_grid_thw", "image_num", "video_num"]
+            self.consumer_columns["actor_log_prob"] = ["vit_embeds", "image_grid_thw", "image_num", "video_num"]
+            self.consumer_columns["ref_log_prob"] = ["vit_embeds", "image_grid_thw", "image_num", "video_num"]
 
     def get_columns(self, consumer: str):
         if consumer not in self.consumer_columns:
@@ -835,7 +840,7 @@ def trans_mm_experience_to_output(
     for i, experience_column in enumerate(experience_columns):
         if experience_column == 'labels':
             data = experience[i]
-        elif experience_column == 'image_num':
+        elif experience_column in ['image_num', 'video_num', 'video_fps']:
             data = torch.tensor(experience[i]).reshape(-1, 1)
         elif experience_column == 'image':
             data = torch.concat(experience[i], dim=1)
@@ -1126,7 +1131,7 @@ def calculate_split_indices(tensor_shapes: Tensor, merge_shape: bool=False) -> T
 
     tensor_sizes = []
     for shape in tensor_shapes:
-        size = shape[0] * shape[1] * shape[2]
+        size = shape.prod()
         if merge_shape:
             size //= (merge_size * merge_size)
         tensor_sizes.append(size.item())
@@ -1158,13 +1163,11 @@ def restore_images_from_tensors(flattened_tensors: Tensor, tensor_shapes: Tensor
     
     flattened_tensors = flattened_tensors.squeeze(0)
     for i in range(len(tensor_sizes)):
-        channels, height, width = tensor_shapes[i].tolist()
-        
         start_idx = split_indices[i]
         end_idx = split_indices[i+1]
         flat_tensor = flattened_tensors[start_idx:end_idx]
         
-        reconstructed_tensor = flat_tensor.reshape(int(channels), int(height), int(width))
+        reconstructed_tensor = flat_tensor.reshape(tensor_shapes[i].tolist())
         reconstructed_image = to_pil(reconstructed_tensor)
         reconstructed_images.append(reconstructed_image)
 
@@ -1175,6 +1178,33 @@ def restore_images_from_tensors(flattened_tensors: Tensor, tensor_shapes: Tensor
         res_images.append(reconstructed_images[start_idx: start_idx + i.item()])
         start_idx += i.item()
     return res_images
+
+
+def restore_videos_from_tensors(flattened_tensors: Tensor, tensor_shapes: Tensor, video_num: Tensor) -> List:
+    
+    print(f"restore_videos_from_tensors flattened_tensors:{flattened_tensors.size()}")
+    print(f"restore_videos_from_tensors tensor_shapes:{tensor_shapes.size()}")
+    print(f"restore_videos_from_tensors video_num:{video_num.size()}")
+    
+    tensor_sizes, split_indices = calculate_split_indices(tensor_shapes)
+
+    reconstructed_videos = []
+    flattened_tensors = flattened_tensors.squeeze(0)
+    for i in range(len(tensor_sizes)):
+        start_idx = split_indices[i]
+        end_idx = split_indices[i + 1]
+        flat_tensor = flattened_tensors[start_idx:end_idx]
+
+        reconstructed_videos.append(flat_tensor.reshape(tensor_shapes[i].tolist()))
+
+    res_video = []
+    start_idx = 0
+    video_num = video_num.squeeze(0)
+    for i in video_num:
+        res_video.append(reconstructed_videos[start_idx: start_idx + i.item()])
+        start_idx += i.item()
+    return res_video
+
 
 def restore_pixel_valaues_from_flattend(flattened_tensors: Tensor, tensor_shapes: Tensor, image_num: Tensor=None, merge_shape: bool=False) -> List[Tensor]:
     """
@@ -1212,6 +1242,23 @@ def restore_pixel_valaues_from_flattend(flattened_tensors: Tensor, tensor_shapes
     return res_pixel_values
 
 
+def restore_split_data(data_tensor: Tensor, split_num: Tensor):
+    """
+    reconstruct data like image_grid_thw, video_fps:
+        [[1,30,40],[1,20,20]]    data1
+        [[1,30,40],[1,20,20]]    data2
+    will concat like [[1,30,40],[1,20,20],[1,30,40],[1,20,20]] -> [[[1,30,40],[1,20,20]], [[1,30,40],[1,20,20]] ]
+    this func used to reconstruct by split_num recorded in data
+    """
+    res = []
+    start_idx = 0
+    split_num = split_num.squeeze(0)
+    for i in split_num:
+        res.append(data_tensor[start_idx: start_idx + i.item()])
+        start_idx += i.item()
+    return res
+
+
 def restore_image_grid_thw(image_grid_thw_tensor: Tensor, image_num: Tensor):
     res_image_grid_thw = []
     start_idx = 0
@@ -1233,26 +1280,31 @@ def unpack_mm_experience(batch_data: Dict[str, Tensor]) -> Dict[str, Tensor]:
     Returns:
         Dict[str, Tensor]: The processed batch data with restored images and pixel values."
     """
-    image_keys = {"image", "image_shape"}
+    image_keys = {"image", "image_shape", "video", "video_shape"}
     pixel_values_keys = {"pixel_values", "image_grid_thw"}
     vit_embeds_keys = {"vit_embeds", "image_grid_thw"}
+    
+    # breakpoint()
 
     if image_keys.issubset(batch_data.keys()):
-        batch_data["image"] = restore_images_from_tensors(batch_data["image"], batch_data["image_shape"], batch_data["image_num"])
-        
-    
+        # not support hybrid image&video dataset
+        if torch.sum(batch_data["image_num"]).item() > 0:
+            batch_data["image"] = restore_images_from_tensors(batch_data["image"], batch_data["image_shape"], batch_data["image_num"])
+        else:
+            batch_data["video"] = restore_videos_from_tensors(batch_data["video"], batch_data["video_shape"], batch_data["video_num"])
+            batch_data["video_fps"] = restore_split_data(batch_data["video_fps"], batch_data["video_num"])
+
     if pixel_values_keys.issubset(batch_data.keys()):
-        # print(f"pixel_values size:{batch_data['pixel_values'].size()}")
-        # print(f"image_grid_thw:{batch_data['image_grid_thw'].size()}")
-        # print(f"image_num:{batch_data['image_num'].size()}")
-        
-        # exit(0)
-        
-        batch_data["pixel_values"] = restore_pixel_valaues_from_flattend(batch_data["pixel_values"], batch_data["image_grid_thw"], batch_data["image_num"])
-        batch_data["image_grid_thw"] = restore_image_grid_thw(batch_data["image_grid_thw"], batch_data["image_num"])
-    
+        mm_data_num = batch_data["image_num"] if torch.sum(batch_data["image_num"]).item() else batch_data["video_num"]
+        batch_data["pixel_values"] = restore_pixel_valaues_from_flattend(batch_data["pixel_values"],
+                                                                         batch_data["image_grid_thw"], mm_data_num)
+        batch_data["image_grid_thw"] = restore_split_data(batch_data["image_grid_thw"], mm_data_num)
+
     if vit_embeds_keys.issubset(batch_data.keys()):
-        batch_data["vit_embeds"] = restore_pixel_valaues_from_flattend(batch_data["vit_embeds"], batch_data["image_grid_thw"], batch_data["image_num"], merge_shape=True)
-        batch_data["image_grid_thw"] = restore_image_grid_thw(batch_data["image_grid_thw"], batch_data["image_num"])
-    
+        mm_data_num = batch_data["image_num"] if torch.sum(batch_data["image_num"]).item() else batch_data["video_num"]
+        batch_data["vit_embeds"] = restore_pixel_valaues_from_flattend(batch_data["vit_embeds"],
+                                                                       batch_data["image_grid_thw"], mm_data_num,
+                                                                       merge_shape=True)
+        batch_data["image_grid_thw"] = restore_split_data(batch_data["image_grid_thw"], mm_data_num)
+
     return batch_data

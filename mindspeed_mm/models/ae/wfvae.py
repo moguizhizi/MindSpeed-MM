@@ -18,8 +18,12 @@ from mindspeed_mm.models.common.wavelet import (
 )
 from mindspeed_mm.models.common.conv import Conv2d, WfCausalConv3d
 from mindspeed_mm.models.common.resnet_block import ResnetBlock2D, ResnetBlock3D
-from mindspeed_mm.models.common.updownsample import Upsample, Downsample, Spatial2xTime2x3DDownsample, \
+from mindspeed_mm.models.common.updownsample import (
+    Upsample, 
+    Downsample, 
+    Spatial2xTime2x3DDownsample,
     CachedCausal3DUpsample
+)
 from mindspeed_mm.utils.utils import (
     is_context_parallel_initialized,
     initialize_context_parallel,
@@ -113,8 +117,11 @@ class Encoder(MultiModalModule):
         # Connection
         if l1_downsample_wavelet.endswith("2D"):
             l1_channels = 12
-        else:
+        elif l1_downsample_wavelet.endswith("3D"):
             l1_channels = 24
+        else:
+            raise ValueError('l1_downsample_wavelet only Support `HaarWaveletTransform2D` and `HaarWaveletTransform3D`')
+
         self.connect_l1 = Conv2d(
             l1_channels, energy_flow_hidden_size, kernel_size=3, stride=1, padding=1
         )
@@ -287,6 +294,13 @@ class Decoder(MultiModalModule):
             ],
         )
         # Connection
+        if l1_upsample_wavelet.endswith("2D"):
+            l1_channels = 12
+        elif l1_upsample_wavelet.endswith("3D"):
+            l1_channels = 24
+        else:
+            raise ValueError('l1_upsample_wavelet only Support `InverseHaarWaveletTransform2D` and `InverseHaarWaveletTransform3D`')
+
         self.connect_l1 = nn.Sequential(
             *[
                 ResnetBlock3D(
@@ -299,7 +313,7 @@ class Decoder(MultiModalModule):
                 )
                 for _ in range(connect_res_layer_num)
             ],
-            Conv2d(energy_flow_hidden_size, 12, kernel_size=3, stride=1, padding=1),
+            Conv2d(energy_flow_hidden_size, l1_channels, kernel_size=3, stride=1, padding=1),
         )
         self.connect_l2 = nn.Sequential(
             *[
@@ -577,7 +591,7 @@ class WFVAE(MultiModalModule):
         for idx, (start, end) in enumerate(start_end):
             self._set_first_chunk(idx == 0)
 
-            if end + 1 < t:
+            if idx != 0 and end + 1 < t:
                 chunk = x[:, :, start:end + 1, :, :]
             else:
                 chunk = x[:, :, start:end, :, :]
@@ -586,7 +600,7 @@ class WFVAE(MultiModalModule):
                 chunk = self.post_quant_conv(chunk)
             chunk = self.decoder(chunk)
 
-            if end + 1 < t:
+            if idx != 0 and end + 1 < t:
                 chunk = chunk[:, :, :-self.temporal_uptimes]
                 result.append(chunk.clone())
             else:

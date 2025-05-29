@@ -14,6 +14,9 @@ class MultiModalDataConfig(BaseConfig):
         # Multimodal dataset image key
         self.image_key: str = None
 
+        # Multimodal dataset video key
+        self.video_key: str = None
+
         # 
         self.truncation: str = None
 
