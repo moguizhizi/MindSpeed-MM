@@ -19,8 +19,14 @@
       - [参数配置](#参数配置-1)
       - [启动训练](#启动训练)
       - [权重后处理](#权重后处理)
-  - [推理](#推理)
+  - [I2V lora微调](#i2v-lora微调)
     - [准备工作](#准备工作-2)
+      - [权重转换](#权重转换-1)
+      - [特征提取](#特征提取-1)
+      - [配置参数](#配置参数)
+    - [启动lora微调](#启动lora微调)
+  - [推理](#推理)
+    - [准备工作](#准备工作-3)
     - [参数配置](#参数配置-2)
     - [启动推理](#启动推理)
   - [环境变量声明](#环境变量声明)
@@ -97,8 +103,8 @@ pip install decord==0.6.0
 
 ### HunyuanVideoDiT与VAE下载
 + [tencent/HunyuanVideo](https://huggingface.co/tencent/HunyuanVideo)
-
-下载后的权重结构如下
++ [tencent/HunyuanVideo-I2V](https://huggingface.co/tencent/HunyuanVideo-I2V)
+下载后的权重结构分别如下
 ```shell
 HunyuanVideo
   ├──README.md
@@ -109,7 +115,18 @@ HunyuanVideo
   │  │  ├──config.json
   │  │  ├──pytorch_model.pt
 ```
-其中`HunyuanVideo/hunyuan-video-t2v-720p/transformers`是transformer部分的权重，`HunyuanVideo/hunyuan-video-t2v-720p/vae`是VAE部分的权重
+```shell
+  HunyuanVideo-I2V
+    ├──README.md
+    ├──hunyuan-video-i2v-720p
+    │  ├──transformers
+    │  │  ├──mp_rank_00_model_states.pt
+    │  ├──vae
+    │  ├──lora
+    │  │  ├──embrace_kohaya_weights.safetensors
+    │  │  ├──hair_growth_kohaya_weights.safetensors
+  ```
+其中`HunyuanVideo/hunyuan-video-t2v-720p/transformers`和`HunyuanVideo-I2V/hunyuan-video-i2v-720p/transformers`是transformer部分的权重，`HunyuanVideo/hunyuan-video-t2v-720p/vae`和`HunyuanVideo-I2V/hunyuan-video-i2v-720p/vae`是VAE部分的权重，`HunyuanVideo-I2V/hunyuan-video-i2v-720p/lora`是lora权重
 
 ### 权重转换
 需要对`llava-llama3-8b`模型进行权重转换，运行权重转换脚本：
@@ -117,9 +134,17 @@ HunyuanVideo
 python examples/convert_ckpt_to_mm.py --module text_encoder --source_path <llava-llama-3-8b> --target_path <llava-llama-3-8b-text-encoder-tokenizer>
 ```
 
-需要对hunyuanvideo的transformer部分进行权重转换，运行权重转换脚本：
+需要分别对hunyuanvideo-t2v和i2v的transformer部分进行权重转换，运行权重转换脚本：
 ```shell
-python examples/convert_ckpt_to_mm.py --source_path <hunyuan-video-t2v-720p/transformers/mp_rank_00/model_states.pt> --target_path <./ckpt/hunyuanvideo> --tp_size <tp_size>
+python examples/hunyuanvideo/convert_ckpt_to_mm.py --source_path <hunyuan-video-t2v-720p/transformers/mp_rank_00/model_states.pt> --target_path <./ckpt/hunyuanvideo> --tp_size <tp_size>
+```
+```bash
+python examples/hunyuanvideo/convert_ckpt_to_mm.py --source_path <hunyuan-video-i2v-720p/transformers/mp_rank_00_model_states.pt> --target_path <./ckpt/hunyuanvideo-i2v> --tp_size <tp_size>
+```
+
+需要对hunyuanvideo-i2v的lora权重转换，运行权重转换脚本：
+```bash
+python examples/hunyuanvideo/convert_ckpt_to_mm.py --module lora --source_path <hunyuan-video-i2v-720p/lora/embrace_kohaya_weights.safetensors> --target_path <./ckpt/hunyuanvideo-i2v-lora>
 ```
 
 权重转换脚本的参数说明如下：
@@ -190,6 +215,7 @@ python examples/convert_ckpt_to_mm.py --source_path <hunyuan-video-t2v-720p/tran
 | ------------------------------------------------------------ | :-------------------: | :-------------------------------------------------- |
 | examples/hunyuanvideo/feature_extract/data.json              |      num_frames       | 最大的帧数，超过则随机选取其中的num_frames帧        |
 | examples/hunyuanvideo/feature_extract/data.json              | max_height, max_width | 最大的长宽，超过则centercrop到最大分辨率            |
+| examples/hunyuanvideo/feature_extract/data.json              |    from_pretrained    | 修改为下载的权重所对应路径（包括Tokenizer） |
 | examples/hunyuanvideo/feature_extract/feature_extraction.sh  |     NPUS_PER_NODE     | 卡数                                                |
 | examples/hunyuanvideo/feature_extract/model_hunyuanvideo.json |    from_pretrained    | 修改为下载的权重所对应路径（包括VAE、Text Encoder） |
 | examples/hunyuanvideo/feature_extract/tools.json             |       save_path       | 提取后的特征保存路径                                |
@@ -278,6 +304,8 @@ bash examples/hunyuanvideo/feature_extract/feature_extraction.sh
 
   - 在`examples/hunyuanvideo/{task_name}/model_hunyuanvideo.json`中，`double_stream_full_recompute_layers`和`single_stream_full_recompute_layers`表示该模型的double_stream_block和single_stream_block进行全重计算的层数，可以逐步减小这两个参数，直至显存打满
 
+> ⚠️**hunyuanvideo i2v目前未适配CP与TPSP**
+
 #### 启动训练
 
 ```bash
@@ -290,6 +318,43 @@ bash examples/hunyuanvideo/{task_name}/pretrain_hunyuanvideo.sh
 
 ```bash
 python examples/convert_ckpt_to_mm.py --source_path <./save_ckpt/hunyuanvideo> --target_path <./save_ckpt_merged/hunyuanvideo> --tp_size <tp_size>
+```
+
+## I2V lora微调
+
+### 准备工作
+配置脚本前请确认环境准备已完成。
+
+#### 权重转换
+ 需要对hunyuanvideo-i2v的transformer部分进行权重转换，运行权重转换脚本：
+```bash
+python examples/hunyuanvideo/convert_ckpt_to_mm.py --module dit --source_path <hunyuan-video-i2v-720p/transformers/mp_rank_00_model_states.pt> --tp_size 1 --target_path <./ckpt/hunyuanvideo-i2v>
+```
+
+#### 特征提取
+请参考上述[特征提取](#特征提取)章节内容，并修改VAE权重为`hunyuan-video-i2v-720p`目录下的VAE权重路径
+
+
+#### 配置参数
+
+默认的配置已经经过测试，用户可按照自身环境修改如下内容：
+
+1. 权重配置
+
+  权重转换完成后根据实际任务情况在启动脚本文件（`examples/hunyuanvideo/i2v/pretrain_hunyuanvideo_lora.sh`）中的`LOAD_PATH="your_converted_dit_ckpt_dir"`变量中添加转换后的权重的实际路径，如`LOAD_PATH="./ckpt/hunyuanvideo-i2v"`,其中`./ckpt/hunyuanvideo-i2v`为转换后的权重的实际路径。`LOAD_PATH`变量中填写的完整路径一定要正确，填写错误的话会导致权重无法加载但运行并不会提示报错。
+  根据需要填写`SAVE_PATH`变量中的路径，用以保存训练后的lora权重。
+
+
+### 启动lora微调
+
+```shell
+bash examples/hunyuanvideo/i2v/pretrain_hunyuanvideo_lora.sh
+```
+
+训练完成后保存的权重仅为lora微调部分，如果需要合并到原始权重中，可以执行以下脚本完成合并（配置仅供参考）：
+
+```bash
+python  checkpoint/merge_base_lora_weight.py --base_save_dir './converted_transformer' --lora_save_dir './my_ckpt' --merge_save_dir './merge_base_lora_target' --lora-target-modules linear fc1 fc2 img_attn_qkv img_attn_proj txt_attn_qkv txt_attn_proj linear1_qkv linear1_mlp linear2 proj_out --lora-alpha 64 --lora-r 64 --pp_size 1 --tp_size 1
 ```
 
 ## 推理

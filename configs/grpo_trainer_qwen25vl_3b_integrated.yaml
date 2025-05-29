@@ -38,7 +38,8 @@ megatron_training:
   variable_seq_lengths: true
   norm_epsilon: 1e-6
   dataset_additional_keys: ['input_ids', 'input_ids_length', 'attention_mask', 'position_ids']
-  data_path: /root/.cache/huggingface/datasets/hiyouga___geometry3k/default/0.0.0/fd21e533e1e50d0662a2bf7b223e60511bd5f8b7/
+  # data_path: /root/.cache/huggingface/datasets/hiyouga___geometry3k/default/0.0.0/fd21e533e1e50d0662a2bf7b223e60511bd5f8b7/
+  data_path: /root/.cache/huggingface/datasets/xyliu6___geometry3k/default/0.0.0/0f59f71cbdfe6f857e1cfedade97758e7316e799/
   split: 100,0,0
   use_deter_comp: true # 是否开启确定性计算
 
@@ -64,7 +65,7 @@ actor_config:
   save: ./ckpt
   no_load_optim: true
   no_load_rng: true
-  num_workers: 8
+  num_workers: 2
 
 rl_config:
   guarantee_order: true # TD 是否保序
@@ -88,7 +89,7 @@ rl_config:
   use_integrated_worker: true # 是否共卡
   reuse_image_embeds: false # 是否vit复用
   actor_resource:
-    num_npus: 8
+    num_npus: 2
 
 generate_config:
   # 多图场景最多图片数量

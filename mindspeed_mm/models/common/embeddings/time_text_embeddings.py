@@ -1,3 +1,4 @@
+import torch
 from torch import nn
 from diffusers.models.embeddings import PixArtAlphaTextProjection, Timesteps, TimestepEmbedding
 
@@ -15,7 +16,10 @@ class CombinedTimestepTextProjEmbeddings(nn.Module):
         timesteps_emb = self.timestep_embedder(timesteps_proj.to(dtype=pooled_projection.dtype))  # (N, D)
 
         pooled_projections = self.text_embedder(pooled_projection)
-
+        timesteps_emb = timesteps_emb.float()
+        pooled_projections = pooled_projections.float()
         conditioning = timesteps_emb + pooled_projections
+        if conditioning.dtype != torch.float32:
+            raise ValueError("Conditioning embeddings must be float32.")
 
         return conditioning

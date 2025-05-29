@@ -1,9 +1,10 @@
-model: /home/project/Ascend_Community/MindSpeed-MM/configs/model/qwen2.5vl_3b.json
+model: /path/MindSpeed-MM/configs/model/qwen2.5vl_3b.json
 
 data_config:
   prompt_key: prompt
   answer_key: answer
   image_key: images
+  video_key: videos
   truncation: left
   shuffle: false
   max_pixels: 4194304
@@ -13,6 +14,9 @@ megatron_training:
   model: qwen2.5vl_3b
   use_fused_rmsnorm: false
   normalization: RMSNorm
+  use_dynamic_bsz: false
+  max_log_prob_seq_len_forward: 0
+  max_log_prob_seq_len_update: 0
   use_mcore_models: true
   sequence_parallel: false
   use_flash_attn: true
@@ -26,7 +30,7 @@ megatron_training:
   tokenizer_type: PretrainedFromHF
   tokenizer_name_or_path: /path/Qwen2.5-VL-3B-Instruct
   global_batch_size: 256
-  seq_length: 512
+  seq_length: 1024
   save_interval: 50
   train_iters: 1000
   stage: ray_grpo
@@ -92,7 +96,8 @@ rl_config:
 
 generate_config:
   # 多图场景最多图片数量
-  limit_mm_image_per_prompt: 1 
+  limit_mm_image_per_prompt: 1
+  limit_mm_video_per_prompt: 0
 
   # tokenizer相关配置
   micro_batch_size: 32 # Generation global_batch_size // data_parallel * n_samples整除
@@ -105,7 +110,7 @@ generate_config:
 
   # vllm 模型相关设置
   max_num_seqs: 32
-  max_model_len: 3072 # prompt_length + response_length 
+  max_model_len: 3072 # prompt_length + response_length
   dtype: "bfloat16"
   gpu_memory_utilization: 0.8
 

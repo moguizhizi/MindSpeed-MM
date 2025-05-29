@@ -10,7 +10,7 @@ import torch
 from mindspeed_rl.config_cls.megatron_config import MegatronConfig
 from mindspeed_rl.config_cls.rl_config import RLConfig
 from mindspeed_rl.config_cls.generate_config import GenerateConfig
-from mindspeed_rl.config_cls.profiler_config import ProfilerConfig   
+from mindspeed_rl.config_cls.profiler_config import ProfilerConfig
 from mindspeed_rl.models.reference import Reference
 from mindspeed_rl.utils.utils import get_least_common_multiple
 from mindspeed_rl.utils.pad_process import truncate_rows
@@ -80,6 +80,7 @@ class ReferenceWorkerBase(BaseWorker):
             stage=self.megatron_config.stage,
             forward_backward_func=self.forward_backward_func,
             micro_batch_size=self.megatron_config.ref_log_prob_micro_batch_size,
+            temperature=self.generate_config.sampling_config["temperature"],
             forward_micro_batch_size=self.megatron_config.ref_log_prob_micro_batch_size
         )
 
@@ -90,8 +91,8 @@ class ReferenceWorkerBase(BaseWorker):
     @mstx_timer_decorator
     def compute_ref_log_prob(self):
         experience_consumer_stage = 'ref_log_prob'
-        experience_columns = ['input_ids', 'responses', 'response_length', 'prompt_length', 'attention_mask', 'position_ids']
-        
+        experience_columns = ['input_ids', 'responses', 'response_length', 'prompt_length', 'attention_mask', 'position_ids', 'input_ids_length']
+
         experience_count = get_least_common_multiple(self.megatron_config.ref_log_prob_micro_batch_size,
                                                      self.rl_config.n_samples_per_prompt)
         sorted_indexes = self.get_dp_range_indexes(experience_count,
@@ -106,7 +107,7 @@ class ReferenceWorkerBase(BaseWorker):
                                                                  indexes=sorted_indexes.pop(
                                                                      0) if self.rl_config.guarantee_order else None,
                                                                  get_n_samples=False)
-            
+
             if not start_time_defined:
                 start_time = time.time()
                 start_time_defined = True
@@ -118,7 +119,7 @@ class ReferenceWorkerBase(BaseWorker):
                     )
                 )
             if batch_data and index:
-                output, batch = self.reference.compute_log_prob(batch_data)
+                output, batch = self.reference.compute_log_prob(batch_data, self.rl_config.reuse_image_embeds)
 
                 if self.parallel_state.is_pipeline_last_stage(ignore_virtual=True):
                     # only on last rank. It should be on every tp rank

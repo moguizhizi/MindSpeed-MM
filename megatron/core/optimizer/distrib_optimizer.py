@@ -418,11 +418,9 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             init_state_fn,
         )
 
-        #print(f"optimizer:{optimizer}")
-
-        # assert isinstance(
-        #   optimizer, Adam
-        # ), "Only Adam currently supported, due to checkpointing requirements."
+        assert isinstance(
+            optimizer, Adam
+        ), "Only Adam currently supported, due to checkpointing requirements."
 
         # Model grad buffer ranges.
         assert per_model_buffers is not None, "per_model_buffers must be provided"

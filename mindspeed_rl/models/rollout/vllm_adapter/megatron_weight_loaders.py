@@ -208,8 +208,6 @@ MODEL_MEGATRON_WEIGHT_LOADER_REGISTRY = {
     "LlamaForCausalLM": llama_megatron_core_weight_loader,
     "Qwen2ForCausalLM": qwen_megatron_weight_loader,
     "DeepseekV3ForCausalLM": deepseek_megatron_weight_loader,
-    "Qwen2VLForConditionalGeneration": qwen_vl_megatron_weight_loader,
-    "CustomQwen2VLForConditionalGeneration": qwen_vl_megatron_weight_loader,
     "Qwen2_5_VLForConditionalGeneration": qwen_vl_megatron_weight_loader,
 }
 

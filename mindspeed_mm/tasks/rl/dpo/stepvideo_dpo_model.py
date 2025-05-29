@@ -45,6 +45,16 @@ class StepVideoDPOModel(nn.Module):
         self.input_tensor = input_tensor
         self.actor.set_input_tensor(input_tensor)
 
+    def state_dict_for_save_checkpoint(self, prefix="", keep_vars=False):
+        """Customized state_dict"""
+        if not get_args().dist_train:
+            state_dict = self.actor.state_dict(prefix=prefix, keep_vars=keep_vars)
+            return state_dict
+        from mindspeed.multi_modal.dist_train.parallel_state import is_in_subworld
+        if is_in_subworld('dit'):
+            return self.actor.state_dict(prefix=prefix, keep_vars=keep_vars)
+        return None
+
     def forward(self, video, video_lose, prompt_ids, video_mask=None, prompt_mask=None, **kwargs):
         latents, _ = self.ae.encode(video)
         latents_lose, _ = self.ae.encode(video_lose)
@@ -62,6 +72,8 @@ class StepVideoDPOModel(nn.Module):
                 prompt_mask=prompt_mask,
                 **kwargs,
             )
+            if isinstance(refer_output, tuple):
+                refer_output = refer_output[0]
         actor_output = self.actor(
             noised_latents,
             timestep=timesteps,
@@ -70,6 +82,8 @@ class StepVideoDPOModel(nn.Module):
             prompt_mask=prompt_mask,
             **kwargs,
         )
+        if isinstance(actor_output, tuple):
+            actor_output = actor_output[0]
         output = torch.cat((refer_output, actor_output), dim=0)
 
         return output, torch.cat((latents, latents_lose), dim=0), noised_latents, noise, timesteps

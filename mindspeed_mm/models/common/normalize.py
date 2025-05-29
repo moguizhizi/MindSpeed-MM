@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 
 from megatron.legacy.model import RMSNorm
@@ -24,6 +25,34 @@ class LayerNorm(nn.Module):
             x = self.norm(x)
             x = rearrange(x, "b h w c -> b c h w")
         return x
+
+
+class FP32LayerNorm(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        eps: float = 1e-6,
+        sequence_parallel: bool = False,
+        **kwargs
+    ):
+        super().__init__()
+        self.dim = (dim,)
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(self.dim))
+        self.bias = nn.Parameter(torch.zeros(self.dim))
+
+        setattr(self.weight, 'sequence_parallel', sequence_parallel)
+        setattr(self.bias, 'sequence_parallel', sequence_parallel)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        origin_dtype = inputs.dtype
+        return F.layer_norm(
+            inputs.float(),
+            self.dim,
+            self.weight.float() if self.weight is not None else None,
+            self.bias.float() if self.bias is not None else None,
+            self.eps,
+        ).to(origin_dtype)  
 
 
 def normalize(in_channels, num_groups=32, eps=1e-6, affine=True, norm_type="groupnorm", gather=False, **kwargs):

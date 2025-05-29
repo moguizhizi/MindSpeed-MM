@@ -6,14 +6,16 @@ from functools import partial
 
 import torch
 from torch.utils.data import DataLoader
+import itertools
 
 from mindspeed_rl.models.loss.base_loss_func import BaseLossFunc
 from mindspeed_rl.models.loss.loss_func_factory import LossFuncFactory
 from mindspeed_rl.utils.utils import (
     append_to_dict, generate_mask, generate_position_ids, get_tune_attention_mask
 )
+from mindspeed_rl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
 from mindspeed_rl.utils.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
-
+from mindspeed_rl.utils.compute import get_parallel_state
 
 class BaseTrainingEngine(ABC):
     """
@@ -52,6 +54,9 @@ class BaseTrainingEngine(ABC):
             micro_batch_size: int = 1,
             forward_micro_batch_size: int = 1,
             vit_micro_batch_size: int = 1,
+            use_dynamic_bsz: bool = False,
+            max_log_prob_seq_len_forward: int = 1,
+            max_log_prob_seq_len_update: int = 1,
             forward_backward_func: Callable = None,
             **kwargs):
         self.forward_backward_func = forward_backward_func
@@ -70,6 +75,9 @@ class BaseTrainingEngine(ABC):
         self.kl_ctrl = kl_ctrl
         self.clip_ratio = clip_ratio
         self.temperature = temperature
+        self.use_dynamic_bsz = use_dynamic_bsz
+        self.max_log_prob_seq_len_forward = max_log_prob_seq_len_forward
+        self.max_log_prob_seq_len_update = max_log_prob_seq_len_update
         self.loss_func: BaseLossFunc = LossFuncFactory.get_instance(self.stage, self.role)
         self.kwargs = kwargs
 
@@ -93,19 +101,49 @@ class BaseTrainingEngine(ABC):
         if shuffle_mini_batch:
             random.shuffle(batches)
         return batches
+    
+    @staticmethod
+    def _split_batches_by_max_length(batch: Dict, max_length: int, shuffle_mini_batch: bool, is_mini_batch: bool = False, dim: int = 0) -> List[Dict]:
+        actual_lengths = (batch["response_length"] + batch["input_ids_length"]).squeeze(1).cpu().numpy().tolist()
+        partitions = rearrange_micro_batches(actual_lengths, max_length)
+        batches = []
+        for key,value in batch.items():
+            if isinstance(value, torch.Tensor):
+                for batch_idx, partition in enumerate(partitions):
+                    if batch_idx >= len(batches):
+                        batches.append({})
+                    batches[batch_idx][key] = value[partition]
+            elif isinstance(value, List):
+                for batch_idx, partition in enumerate(partitions):
+                    if batch_idx >= len(batches):
+                        batches.append({})
+                    if is_mini_batch:
+                        batches[batch_idx][key] = [value[p] for p in partition]
+                    else:
+                        batches[batch_idx][key] = torch.concat([value[p] for p in partition])
+        if shuffle_mini_batch:
+            random.shuffle(batches)
+        return batches, partitions
 
     def _forward_backward_batch(self, batch: Dict[str, torch.Tensor], forward_only: bool = False, vit_only: bool = False, llm_only: bool = False):
         if forward_only:
             micro_batch_size = self.vit_micro_batch_size if vit_only else self.forward_micro_batch_size
+            split_seq_len = self.max_log_prob_seq_len_forward
         else:
             micro_batch_size = self.micro_batch_size
+            split_seq_len = self.max_log_prob_seq_len_update
 
-        batches = self._split_batches(batch, batch_size=micro_batch_size,
+        if self.use_dynamic_bsz and not vit_only:
+            batches,indices = self._split_batches_by_max_length(batch, split_seq_len, self.shuffle_mini_batch) 
+        else:
+            batches = self._split_batches(batch, batch_size=micro_batch_size,
                                       shuffle_mini_batch=self.shuffle_mini_batch)
         n_micro_batch = len(batches)
         seq_len = batches[0]['input_ids'].shape[1]
 
         self.loss_func.add_loss_meta_info(self.get_loss_meta_func())
+        
+        post_process = get_parallel_state().get_pipeline_model_parallel_world_size() == 1 or get_parallel_state().is_pipeline_last_stage()
 
         def forward_step(batch_iter, model):
             # input_ids, attention_mask, position_ids, process_batch = self._get_forward_batch_info(batch_iter)
@@ -115,7 +153,8 @@ class BaseTrainingEngine(ABC):
             if isinstance(output, dict) and "logits" in output:
                 output["logits"].div_(self.temperature)
             # output = model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids)
-            return output, partial(self.loss_func.compute_loss, batch=process_batch, forward_only=forward_only)
+            return output, partial(self.loss_func.compute_loss, batch=process_batch, forward_only=forward_only,
+                                   max_log_prob_seq_len=split_seq_len, config_micro_batch_size=self.micro_batch_size)
 
         # batch should be a list of batches inside micro-batches
         losses_reduced = self.forward_backward_func(
@@ -128,6 +167,12 @@ class BaseTrainingEngine(ABC):
             forward_only=forward_only,
             collect_non_loss_data=forward_only,
         )
+        
+        if self.use_dynamic_bsz and forward_only and not vit_only and post_process:
+            losses_reduced_list = torch.cat(losses_reduced, dim=0)
+            indices = list(itertools.chain.from_iterable(indices))
+            revert_indices = get_reverse_idx(indices)
+            losses_reduced = [losses_reduced_list[[idx,]] for idx in revert_indices]
         return losses_reduced
 
     def get_loss_meta_func(self) -> Dict:

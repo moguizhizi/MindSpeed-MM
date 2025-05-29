@@ -99,6 +99,9 @@ class IntegratedWorker(ActorHybridWorkerBase, ReferenceWorkerBase, RewardWorkerB
             forward_backward_func=self.forward_backward_func,
             micro_batch_size=self.megatron_config.ref_log_prob_micro_batch_size,
             temperature=self.generate_config.sampling_config["temperature"],
+            use_dynamic_bsz=self.megatron_config.use_dynamic_bsz,
+            max_log_prob_seq_len_forward=self.megatron_config.max_log_prob_seq_len_forward,
+            max_log_prob_seq_len_update=self.megatron_config.max_log_prob_seq_len_update,
             forward_micro_batch_size=self.megatron_config.ref_log_prob_micro_batch_size
         )
 

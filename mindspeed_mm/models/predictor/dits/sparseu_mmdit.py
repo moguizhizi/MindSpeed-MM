@@ -1,5 +1,4 @@
 import random
-from selectors import EpollSelector
 from typing import Any, Dict, Optional, Tuple, List
 from dataclasses import dataclass
 
@@ -16,6 +15,7 @@ from megatron.training.arguments import core_transformer_config_from_args
 from mindspeed_mm.models.common import MultiModalModule
 from mindspeed_mm.models.common.embeddings import PatchEmbed2D, CombinedTimestepTextProjEmbeddings
 from mindspeed_mm.models.common.ffn import FeedForward
+from mindspeed_mm.models.common.normalize import FP32LayerNorm
 from mindspeed_mm.models.common.attention import MultiHeadSparseMMAttentionSBH
 from mindspeed_mm.models.common.communications import split_forward_gather_backward, gather_forward_split_backward
 
@@ -27,6 +27,32 @@ def create_custom_forward(module, return_dict=None):
         else:
             return module(*inputs)
     return custom_forward
+
+
+def zero_initialized_skip_connection(module_cls):
+    if not issubclass(module_cls, nn.Linear):
+        raise TypeError(f"Expected module_cls to be nn.Linear, but got {module_cls.__name__}.")
+
+    def zero_init(*args, **kwargs):
+        module = module_cls(*args, **kwargs)
+        in_features = module.in_features
+        out_features = module.out_features
+        if in_features != 2 * out_features:
+            raise ValueError("Expected in_features to be twice out_features, "
+                             f"but got in_features={in_features} and out_features={out_features}.")
+
+        module.weight.data[:, :out_features] = torch.eye(out_features, dtype=module.weight.dtype)
+        module.weight.data[:, out_features:] = 0.0
+        if module.bias is not None:
+            module.bias.data.fill_(0.0)
+        return module
+    return zero_init
+
+
+def maybe_clamp_tensor(x, max_value=65504.0, min_value=-65504.0, training=True):
+    if not training and x.dtype == torch.float16:
+        x.nan_to_num_(posinf=max_value, neginf=min_value).clamp_(min_value, max_value)
+    return x
 
 
 @dataclass
@@ -95,9 +121,10 @@ class SparseUMMDiT(MultiModalModule):
         sparse1d: bool = False,
         pooled_projection_dim: int = 1024,
         timestep_embed_dim: int = 512,
-        norm_cls: str = 'rms_norm',
+        norm_cls: str = 'fp32_layer_norm',
         skip_connection: bool = False,
         explicit_uniform_rope: bool = False,
+        skip_connection_zero_init: bool = True,
         **kwargs
     ):
         super().__init__(config=None)
@@ -122,12 +149,12 @@ class SparseUMMDiT(MultiModalModule):
         self.patch_size_t = patch_size_thw[0]
         self.patch_size = patch_size_thw[1]
         self.skip_connection = skip_connection
+        self.skip_connection_zero_init = skip_connection_zero_init
 
         if norm_cls == 'rms_norm':
             self.norm_cls = RMSNorm
-        elif norm_cls == 'layer_norm':
-            self.norm_cls = nn.LayerNorm
-
+        elif norm_cls == 'fp32_layer_norm':
+            self.norm_cls = FP32LayerNorm
 
         if len(num_layers) != len(sparse_n):
             raise ValueError("num_layers and sparse_n must have the same length")
@@ -159,7 +186,7 @@ class SparseUMMDiT(MultiModalModule):
         self.caption_projection = nn.Linear(caption_channels, hidden_size)
 
         # 4. rope
-        self.rope = RoPE3D(interpolation_scale=interpolation_scale_thw)
+        self.rope = RoPE3D(interpolation_scale_thw=interpolation_scale_thw)
         self.position_getter = PositionGetter3D(
             sample_size_t, sample_size_h, sample_size_w, explicit_uniform_rope, atten_layout="SBH"
         )
@@ -172,14 +199,15 @@ class SparseUMMDiT(MultiModalModule):
         for idx, (num_layer, sparse_n) in enumerate(zip(self.num_layers, self.sparse_n)):
             is_last_stage = idx == len(num_layers) - 1
             if self.skip_connection and idx > len(num_layers) // 2:
+                skip_connection_linear = zero_initialized_skip_connection(nn.Linear) if self.skip_connection_zero_init else nn.Linear
                 self.skip_norm_linear.append(
                     nn.Sequential(
                         self.norm_cls(
                             hidden_size * 2,
                             eps=norm_eps,
                             sequence_parallel=self.sequence_parallel,
-                        ), 
-                        nn.Linear(hidden_size * 2, hidden_size), 
+                        ) if not self.skip_connection_zero_init else nn.Identity(),
+                        skip_connection_linear(hidden_size * 2, hidden_size), 
                     )
                 )
                 self.skip_norm_linear_enc.append(
@@ -188,8 +216,8 @@ class SparseUMMDiT(MultiModalModule):
                             hidden_size * 2,
                             eps=norm_eps,
                             sequence_parallel=self.sequence_parallel,
-                        ), 
-                        nn.Linear(hidden_size * 2, hidden_size), 
+                        ) if not self.skip_connection_zero_init else nn.Identity(),
+                        skip_connection_linear(hidden_size * 2, hidden_size), 
                     )
                 )
             stage_blocks = nn.ModuleList(
@@ -276,8 +304,8 @@ class SparseUMMDiT(MultiModalModule):
         def get_attention_mask(mask, repeat_num):
             mask = mask.to(torch.bool)
             mask = mask.repeat(1, 1, repeat_num, 1)
-            return mask
-
+            return mask        
+        
         attention_mask_sparse_1d = get_attention_mask(
             attention_mask_sparse_1d, attention_mask_sparse_1d.shape[-1]
         )
@@ -317,8 +345,8 @@ class SparseUMMDiT(MultiModalModule):
                     encoder_hidden_states=encoder_hidden_states,
                     inputs=inputs
                 )
-                if self.skip_connection:
-                    skip_connections.append([hidden_states, encoder_hidden_states])
+            if self.skip_connection:
+                skip_connections.append([hidden_states, encoder_hidden_states])
         return hidden_states, encoder_hidden_states, skip_connections
 
     def _operate_on_mid(
@@ -404,7 +432,14 @@ class SparseUMMDiT(MultiModalModule):
         )
         return output
 
-    def block_forward(self, block, hidden_states, attention_mask, encoder_hidden_states, inputs: BlockForwardInputs):
+    def block_forward(
+        self, 
+        block, 
+        hidden_states, 
+        attention_mask, 
+        encoder_hidden_states, 
+        inputs: BlockForwardInputs,
+    ):
         if self.training and self.gradient_checkpointing:
             ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
             hidden_states, encoder_hidden_states = torch.utils.checkpoint.checkpoint(
@@ -441,8 +476,11 @@ class SparseUMMDiT(MultiModalModule):
 
         batch_size, c, frames, height, width = hidden_states.shape
 
+        if encoder_hidden_states.ndim == 3:
+            encoder_hidden_states = encoder_hidden_states.unsqueeze(1)
+
         encoder_attention_mask = encoder_attention_mask.view(batch_size, -1, encoder_attention_mask.shape[-1])
-        if self.training and mpu.get_context_parallel_world_size() > 1:
+        if mpu.get_context_parallel_world_size() > 1:
             frames //= mpu.get_context_parallel_world_size()
             hidden_states = split_forward_gather_backward(hidden_states, mpu.get_context_parallel_group(), dim=2,
                                                     grad_scale='down')
@@ -470,6 +508,9 @@ class SparseUMMDiT(MultiModalModule):
         frames = ((frames - 1) // self.patch_size_t + 1) if frames % 2 == 1 else frames // self.patch_size_t  # patchfy
         height, width = height // self.patch_size, width // self.patch_size
 
+        if pooled_projections is not None and pooled_projections.ndim == 2:
+            pooled_projections = pooled_projections.unsqueeze(1) # b d -> b 1 d
+
         hidden_states, encoder_hidden_states, embedded_timestep = self._operate_on_patched_inputs(
             hidden_states, encoder_hidden_states, timestep, pooled_projections
         )
@@ -481,6 +522,7 @@ class SparseUMMDiT(MultiModalModule):
 
         if attention_mask.device != encoder_attention_mask.device:
             encoder_attention_mask = encoder_attention_mask.to(attention_mask.device)
+
         for sparse_n in list(set(self.sparse_n)):
             self.sparse_mask[sparse_n] = self.prepare_sparse_mask(attention_mask, encoder_attention_mask, sparse_n)
 
@@ -495,7 +537,7 @@ class SparseUMMDiT(MultiModalModule):
             )
         )
 
-        video_rotary_emb = self.rope(self.head_dim, pos_thw, hidden_states.device, hidden_states.dtype)
+        video_rotary_emb = self.rope(self.head_dim, pos_thw, hidden_states.device)
 
         if self.sequence_parallel:
             hidden_states = tensor_parallel.scatter_to_sequence_parallel_region(hidden_states)
@@ -526,7 +568,7 @@ class SparseUMMDiT(MultiModalModule):
             hidden_states, embedded_timestep, frames, height, width
         )  # b c t h w
 
-        if self.training and mpu.get_context_parallel_world_size() > 1:
+        if mpu.get_context_parallel_world_size() > 1:
             output = gather_forward_split_backward(output, mpu.get_context_parallel_group(), dim=2,
                                                         grad_scale='up')
 
@@ -548,14 +590,14 @@ class SparseMMDiTBlock(nn.Module):
         norm_eps: float = 1e-5,
         final_dropout: bool = False,
         ff_inner_dim: Optional[int] = None,
-        ff_bias: bool = True,
+        ff_bias: bool = False,
         context_pre_only: bool = False,
         interpolation_scale_thw: Tuple[int] = (1, 1, 1),
         double_ff: bool = False,
         sparse1d: bool = False,
         sparse_n: int = 2,
         sparse_group: bool = False,
-        norm_cls: str = 'rms_norm',
+        norm_cls: str = 'fp32_layer_norm',
     ):
         super().__init__()
 
@@ -566,9 +608,8 @@ class SparseMMDiTBlock(nn.Module):
 
         if norm_cls == 'rms_norm':
             self.norm_cls = RMSNorm
-        elif norm_cls == 'layer_norm':
-            self.norm_cls = nn.LayerNorm
-
+        elif norm_cls == 'fp32_layer_norm':
+            self.norm_cls = FP32LayerNorm
 
         # adanorm-zero1: to introduce timestep and clip condition
         self.norm1 = OpenSoraNormZero(
@@ -586,7 +627,7 @@ class SparseMMDiTBlock(nn.Module):
             proj_qkv_bias=attention_bias,
             proj_out_bias=attention_out_bias,
             context_pre_only=context_pre_only,
-            qk_norm=norm_cls,
+            qk_norm='rms_norm',
             eps=norm_eps,
             sparse1d=sparse1d,
             sparse_n=sparse_n,
@@ -632,6 +673,8 @@ class SparseMMDiTBlock(nn.Module):
         vis_seq_length, batch_size = hidden_states.shape[:2]
 
         # 1. norm & scale & shift
+        hidden_states = maybe_clamp_tensor(hidden_states, training=self.training)
+        encoder_hidden_states = maybe_clamp_tensor(encoder_hidden_states, training=self.training)
         norm_hidden_states, norm_encoder_hidden_states, gate_msa, enc_gate_msa = self.norm1(
             hidden_states, encoder_hidden_states, inputs.embedded_timestep
         )
@@ -647,31 +690,48 @@ class SparseMMDiTBlock(nn.Module):
             video_rotary_emb=inputs.video_rotary_emb,
         )
 
+        weight_dtype = hidden_states.dtype
+        if gate_msa.dtype != torch.float32 or enc_gate_msa.dtype != torch.float32:
+            raise ValueError("Gate must be float32.")
+
         # 3. residual & gate
-        hidden_states = hidden_states + gate_msa * attn_hidden_states
-        encoder_hidden_states = encoder_hidden_states + enc_gate_msa * attn_encoder_hidden_states
+        hidden_states = hidden_states.float() + gate_msa * attn_hidden_states.float()
+        hidden_states = hidden_states.to(weight_dtype)
+        encoder_hidden_states = encoder_hidden_states.float() + enc_gate_msa * attn_encoder_hidden_states.float()
+        encoder_hidden_states = encoder_hidden_states.to(weight_dtype)
 
         # 4. norm & scale & shift
+        hidden_states = maybe_clamp_tensor(hidden_states, training=self.training)
+        encoder_hidden_states = maybe_clamp_tensor(encoder_hidden_states, training=self.training)
+
         norm_hidden_states, norm_encoder_hidden_states, gate_ff, enc_gate_ff = self.norm2(
             hidden_states, encoder_hidden_states, inputs.embedded_timestep
         )
+        weight_dtype = hidden_states.dtype
+        if gate_ff.dtype != torch.float32 or enc_gate_ff.dtype != torch.float32:
+            raise AssertionError("Gate FFN should be float32")
+
         if self.double_ff:
             # 5. FFN
             vis_ff_output = self.ff(norm_hidden_states)
-            enc_ff_output = self.ff_enc(norm_encoder_hidden_states)
             # 6. residual & gate
-            hidden_states = hidden_states + gate_ff * vis_ff_output
-            encoder_hidden_states = encoder_hidden_states + enc_gate_ff * enc_ff_output
+            hidden_states = hidden_states.float() + gate_ff * vis_ff_output.float()
+            hidden_states = hidden_states.to(weight_dtype)
+            if self.ff_enc is not None:
+                enc_ff_output = self.ff_enc(norm_encoder_hidden_states)
+                encoder_hidden_states = encoder_hidden_states.float() + enc_gate_ff * enc_ff_output.float()
+                encoder_hidden_states = encoder_hidden_states.to(weight_dtype)
         else:
             # 5. FFN
             norm_hidden_states = torch.cat([norm_hidden_states, norm_encoder_hidden_states], dim=0)
             ff_output = self.ff(norm_hidden_states)
             # 6. residual & gate
-            hidden_states = hidden_states + gate_ff * ff_output[:vis_seq_length]
-            encoder_hidden_states = encoder_hidden_states + enc_gate_ff * ff_output[vis_seq_length:]
+            hidden_states = hidden_states.float() + gate_ff * ff_output[:vis_seq_length].float()
+            encoder_hidden_states = encoder_hidden_states.float() + enc_gate_ff * ff_output[vis_seq_length:].float()
+            hidden_states = hidden_states.to(weight_dtype)
+            encoder_hidden_states = encoder_hidden_states.to(weight_dtype)
 
         return hidden_states, encoder_hidden_states
-
 
 
 class AdaNorm(nn.Module):
@@ -693,9 +753,11 @@ class AdaNorm(nn.Module):
         output_dim: Optional[int] = None,
         norm_elementwise_affine: bool = False,
         norm_eps: float = 1e-5,
-        norm_cls: str = 'rms_norm',
+        norm_cls: str = 'fp32_layer_norm',
     ):
         super().__init__()
+        args = get_args()
+        self.sequence_parallel = args.sequence_parallel
         output_dim = output_dim or embedding_dim * 2
 
         if num_embeddings is not None:
@@ -707,8 +769,8 @@ class AdaNorm(nn.Module):
         self.linear = nn.Linear(embedding_dim, output_dim)
         if norm_cls == 'rms_norm':
             self.norm_cls = RMSNorm
-        elif norm_cls == 'layer_norm':
-            self.norm_cls = nn.LayerNorm
+        elif norm_cls == 'fp32_layer_norm':
+            self.norm_cls = FP32LayerNorm
         self.norm = self.norm_cls(
             output_dim // 2, eps=norm_eps
         )
@@ -720,13 +782,21 @@ class AdaNorm(nn.Module):
             temb = self.emb(timestep)
 
         temb = self.linear(self.silu(temb))
+        temb = temb.float()
+        if self.sequence_parallel:
+            temb = tensor_parallel.mappings.all_gather_last_dim_from_tensor_parallel_region(temb)
+        else:
+            temb = tensor_parallel.mappings.gather_from_tensor_model_parallel_region(temb)
         # x shape: (S B H), temb shape: (B, H)
         shift, scale = temb.chunk(2, dim=1)
         shift = shift[None, :, :]
         scale = scale[None, :, :]
 
-        x = self.norm(x) * (1 + scale) + shift
-        return x
+        if shift.dtype != torch.float32 or scale.dtype != torch.float32:
+            raise ValueError("Shift and scale must be float32.")
+        weight_dtype = x.dtype
+        x = self.norm(x).float() * (1 + scale) + shift
+        return x.to(weight_dtype)
 
 
 class OpenSoraNormZero(nn.Module):
@@ -737,7 +807,8 @@ class OpenSoraNormZero(nn.Module):
         elementwise_affine: bool = True,
         eps: float = 1e-5,
         bias: bool = True,
-        norm_cls: str = 'rms_norm',
+        norm_cls: str = 'fp32_layer_norm',
+        context_pre_only: bool = False,
     ) -> None:
         super().__init__()
         args = get_args()
@@ -746,8 +817,8 @@ class OpenSoraNormZero(nn.Module):
 
         if norm_cls == 'rms_norm':
             self.norm_cls = RMSNorm
-        elif norm_cls == 'layer_norm':
-            self.norm_cls = nn.LayerNorm
+        elif norm_cls == 'fp32_layer_norm':
+            self.norm_cls = FP32LayerNorm
 
         self.silu = nn.SiLU()
         self.linear = tensor_parallel.ColumnParallelLinear(
@@ -758,45 +829,60 @@ class OpenSoraNormZero(nn.Module):
             gather_output=True
         )
         self.norm = self.norm_cls(embedding_dim, eps=eps, sequence_parallel=self.sequence_parallel)
-        self.norm_enc = self.norm_cls(embedding_dim, eps=eps, sequence_parallel=self.sequence_parallel)
+        self.norm_enc = None
+        if not context_pre_only:
+            self.norm_enc = self.norm_cls(embedding_dim, eps=eps, sequence_parallel=self.sequence_parallel)
 
         # set label "sequence_parallel", for all_reduce the grad
         for module in [self.norm, self.norm_enc]:
             for param in module.parameters():
                 setattr(param, "sequence_parallel", self.sequence_parallel)
 
-
     def forward(
         self, hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor, temb: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        shift, scale, gate, enc_shift, enc_scale, enc_gate = self.linear(self.silu(temb))[0].chunk(6, dim=1)
-        hidden_states = self.norm(hidden_states) * (1 + scale)[None, :, :] + shift[None, :, :] # because hidden_states'shape is (S B H), so we need to add None at the first dimension
-        encoder_hidden_states = self.norm_enc(encoder_hidden_states) * (1 + enc_scale)[None, :, :] + enc_shift[None, :, :]
-        return hidden_states, encoder_hidden_states, gate[None, :, :], enc_gate[None, :, :]
+        temb = self.linear(self.silu(temb))[0]
+        temb = temb.float()
+        if self.sequence_parallel:
+            temb = tensor_parallel.mappings.all_gather_last_dim_from_tensor_parallel_region(temb)
+        else:
+            temb = tensor_parallel.mappings.gather_from_tensor_model_parallel_region(temb)
+        shift, scale, gate, enc_shift, enc_scale, enc_gate = temb.chunk(6, dim=1)
+
+        if not all(value.dtype == torch.float32 for value in [shift, scale, gate, enc_shift, enc_scale, enc_gate]):
+            raise ValueError("Shift, scale and gate must be float32.")
+
+        weight_dtype = hidden_states.dtype
+        hidden_states = self.norm(hidden_states).float() * (1 + scale)[None, :, :] + shift[None, :, :] # because hidden_states'shape is (S B H), so we need to add None at the first dimension
+        if self.norm_enc is not None:
+            encoder_hidden_states = self.norm_enc(encoder_hidden_states).float() * (1 + enc_scale)[None, :, :] + enc_shift[None, :, :]
+        return hidden_states.to(weight_dtype), encoder_hidden_states.to(weight_dtype), gate[None, :, :], enc_gate[None, :, :]
 
 
-class RoPE3D(nn.Module):
-    
-    def __init__(self, freq=10000.0, interpolation_scale=(1, 1, 1)):
+
+class RoPE3D(torch.nn.Module):
+
+    def __init__(self, freq=10000.0, F0=1.0, interpolation_scale_thw=(1, 1, 1)):
         super().__init__()
         self.base = freq
-        self.interpolation_scale_t, self.interpolation_scale_h, self.interpolation_scale_w = interpolation_scale
+        self.F0 = F0
+        self.interpolation_scale_t = interpolation_scale_thw[0]
+        self.interpolation_scale_h = interpolation_scale_thw[1]
+        self.interpolation_scale_w = interpolation_scale_thw[2]
         self.cache = {}
 
-    def get_cos_sin(self, params):
-        D, seq_start, seq_end, device, dtype, interpolation_scale = params
-        key = (D, seq_start, seq_end, device, dtype)
-        if key not in self.cache:
+    def get_cos_sin(self, D, seq_start, seq_end, device, interpolation_scale=1):
+        if (D, seq_start, seq_start, seq_end) not in self.cache:
             inv_freq = 1.0 / (self.base ** (torch.arange(0, D, 2).float().to(device) / D))
-            t = torch.arange(seq_start, seq_end, device=device, dtype=inv_freq.dtype) / interpolation_scale
-            freqs = torch.einsum("i,j->ij", t, inv_freq).to(dtype)
+            t = torch.arange(seq_start, seq_end, device=device, dtype=torch.float32) / interpolation_scale
+            freqs = torch.einsum("i,j->ij", t, inv_freq)
             freqs = torch.cat((freqs, freqs), dim=-1)
             cos = freqs.cos()  # (Seq, Dim)
             sin = freqs.sin()
-            self.cache[key] = (cos, sin)
-        return self.cache[key]
+            self.cache[D, seq_start, seq_start, seq_end] = (cos, sin)
+        return self.cache[D, seq_start, seq_start, seq_end]
 
-    def forward(self, dim, positions, device, dtype):
+    def forward(self, dim, positions, device):
         """
         input:
             * dim: head_dim
@@ -805,26 +891,23 @@ class RoPE3D(nn.Module):
             * tokens after appplying RoPE3D (ntokens x batch_size x nheads x dim)
         """
         if dim % 16 != 0:
-            raise ValueError("number of dimensions should be a multiple of 16")
+            raise Error(f"number of dimensions should be a multiple of 16")
+
         D_t = dim // 16 * 4
         D = dim // 16 * 6
         poses, min_poses, max_poses = positions
+
         if len(poses) != 3 or poses[0].ndim != 2:  # [Batch, Seq, 3]
             raise AssertionError("poses shape error")
 
-        params_t = (D_t, min_poses[0], max_poses[0], device, dtype, self.interpolation_scale_t)
-        params_y = (D, min_poses[1], max_poses[1], device, dtype, self.interpolation_scale_h)
-        params_x = (D, min_poses[2], max_poses[2], device, dtype, self.interpolation_scale_w)
-
-        cos_t, sin_t = self.get_cos_sin(params_t)
-        cos_y, sin_y = self.get_cos_sin(params_y)
-        cos_x, sin_x = self.get_cos_sin(params_x)
+        cos_t, sin_t = self.get_cos_sin(D_t, min_poses[0], max_poses[0], device, self.interpolation_scale_t)
+        cos_y, sin_y = self.get_cos_sin(D, min_poses[1], max_poses[1], device, self.interpolation_scale_h)
+        cos_x, sin_x = self.get_cos_sin(D, min_poses[2], max_poses[2], device, self.interpolation_scale_w)
 
         cos_t, sin_t = compute_rope1d(poses[0], cos_t, sin_t)
         cos_y, sin_y = compute_rope1d(poses[1], cos_y, sin_y)
         cos_x, sin_x = compute_rope1d(poses[2], cos_x, sin_x)
-        video_rotary_emb = (cos_t, sin_t, cos_y, sin_y, cos_x, sin_x)
-        return video_rotary_emb
+        return cos_t, sin_t, cos_y, sin_y, cos_x, sin_x
 
 
 def compute_rope1d(pos1d, cos, sin):

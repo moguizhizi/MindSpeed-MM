@@ -39,7 +39,10 @@ class GenerateConfig(BaseConfig):
 
     def __init__(self, config_dict):
         # 多图场景最多图片数量
-        self.limit_mm_image_per_prompt = 999
+        self.limit_mm_image_per_prompt = 1
+
+        # 多图场景最多图片数量
+        self.limit_mm_video_per_prompt = 0
 
         self.data_parallel_size = None
         # 设置 tokenizer 的名称或路径，默认指向一个示例路径，可根据实际情况修改
@@ -49,7 +52,7 @@ class GenerateConfig(BaseConfig):
 
         # 推理时的微批次处理数据
         self.micro_batch_size = None
-        
+
         # 推理时的张量并行大小，默认为 8
         self.infer_tensor_parallel_size = 8
 
@@ -88,7 +91,7 @@ class GenerateConfig(BaseConfig):
             "min_p": 0.0,  # token 选择的最小概率阈值
             "temperature": 0.2,  # 控制预测随机性的温度参数
             "detokenize": False,  # 是否将生成的 token 转换回可读字符串
-            "seed": None
+            "seed": None # 随机种子
         }
 
         # 如果提供了配置字典，则更新默认值

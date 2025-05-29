@@ -105,6 +105,9 @@ class ActorHybridWorkerBase(BaseWorker):
             clip_ratio=self.rl_config.clip_ratio,
             micro_batch_size=self.megatron_config.micro_batch_size,
             temperature=self.generate_config.sampling_config["temperature"],
+            use_dynamic_bsz=self.megatron_config.use_dynamic_bsz,
+            max_log_prob_seq_len_forward=self.megatron_config.max_log_prob_seq_len_forward,
+            max_log_prob_seq_len_update=self.megatron_config.max_log_prob_seq_len_update,
             forward_micro_batch_size=self.megatron_config.actor_log_prob_micro_batch_size,
             vit_micro_batch_size=self.megatron_config.actor_image_embeds_micro_batch_size
         )
@@ -134,7 +137,7 @@ class ActorHybridWorkerBase(BaseWorker):
         experience_consumer_stage = 'actor_train'
 
         experience_columns = ['responses', 'advantages', 'old_log_prob',
-                             'ref_log_prob', 'input_ids', 'response_length', 'prompt_length', 'attention_mask', 'position_ids']
+                             'ref_log_prob', 'input_ids', 'response_length', 'prompt_length', 'attention_mask', 'position_ids', 'input_ids_length']
 
         experience_count = self.megatron_config.global_batch_size // self.parallel_state.get_data_parallel_world_size()
         if skip_actor_log_prob:
@@ -173,8 +176,8 @@ class ActorHybridWorkerBase(BaseWorker):
                     ray.get(self.td.update_metrics.remote(value=metrics, cumulate=True))
                     ray.get(
                         self.td.update_metrics.remote(
-                            "timing/update", 
-                            value=[round(time.time(), 4), round(start_time, 4)], 
+                            "timing/update",
+                            value=[round(time.time(), 4), round(start_time, 4)],
                             cumulate=True
                         )
                     )
@@ -196,7 +199,7 @@ class ActorHybridWorkerBase(BaseWorker):
     def save_ckpt(self, iteration: int):
         self.save_checkpoint(iteration, self.model, self.optimizer, self.opt_param_scheduler,
                              self.num_floating_point_operations_so_far)
-    
+
     @mstx_timer_decorator
     def generate_sequences(self):
         start_sharding_enter_infer = time.time()
@@ -264,7 +267,7 @@ class ActorHybridWorkerBase(BaseWorker):
                 end_time = time.time()
                 ray.get(
                         self.td.update_metrics.remote(
-                            "timing/rollout", 
+                            "timing/rollout",
                             value=[round(end_time, 4), round(start_time, 4)],
                             cumulate=True
                         )
@@ -312,9 +315,10 @@ class ActorHybridWorkerBase(BaseWorker):
                     data = {
                                 "vit_embeds": output[0].squeeze(1).cpu(),
                                 "image_grid_thw": batch_data['image_grid_thw'],
-                                "image_num": batch_data['image_num']
+                                "image_num": batch_data['image_num'],
+                                "video_num": batch_data['video_num']
                             }
-                    
+
                     data = unpack_mm_experience(data)
 
                     output = {'vit_embeds': data['vit_embeds']}
@@ -323,7 +327,7 @@ class ActorHybridWorkerBase(BaseWorker):
                 end_time = time.time()
                 ray.get(
                         self.td.update_metrics.remote(
-                            "timing/vit_image_emb", 
+                            "timing/vit_image_emb",
                             value=[round(end_time, 4), round(start_time, 4)],
                             cumulate=True
                         )
@@ -334,7 +338,7 @@ class ActorHybridWorkerBase(BaseWorker):
         self.sharding_manager.enter_forward_mode()
 
         experience_consumer_stage = 'actor_log_prob'
-        experience_columns = ['input_ids', 'responses', 'response_length', 'prompt_length', 'attention_mask', 'position_ids']
+        experience_columns = ['input_ids', 'responses', 'response_length', 'prompt_length', 'attention_mask', 'position_ids', 'input_ids_length']
         experience_count = get_least_common_multiple(self.megatron_config.actor_log_prob_micro_batch_size,
                                                      self.rl_config.n_samples_per_prompt)
         sorted_indexes = self.get_dp_range_indexes(experience_count,
@@ -394,7 +398,7 @@ class ActorHybridWorkerBase(BaseWorker):
             self.megatron_config.tokenizer_name_or_path, trust_remote_code=self.generate_config.trust_remote_code)
 
         sampling_config = {"num_completions": self.rl_config.n_samples_per_prompt,
-                           "best_of": self.rl_config.n_samples_per_prompt,
+                        #    "best_of": self.rl_config.n_samples_per_prompt, # 对齐verl实现
                            **self.generate_config.sampling_config}
 
         rollout = VLLMInferEngine(
@@ -414,7 +418,8 @@ class ActorHybridWorkerBase(BaseWorker):
             dtype=self.generate_config.dtype,
             gpu_memory_utilization=self.generate_config.gpu_memory_utilization,
             trust_remote_code=self.generate_config.trust_remote_code,
-            limit_mm_image_per_prompt=self.generate_config.limit_mm_image_per_prompt
+            limit_mm_image_per_prompt=self.generate_config.limit_mm_image_per_prompt,
+            limit_mm_video_per_prompt=self.generate_config.limit_mm_video_per_prompt
         )
 
         return rollout

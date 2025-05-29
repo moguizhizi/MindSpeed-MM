@@ -142,10 +142,7 @@ class RayGRPOTrainer(RayBaseTrainer):
             ray.get(self.mm_transfer_dock.clear.remote())
 
             batch = next(data_iters)
-            
-            print(f"fit_batch:{len(batch['prompt_length'])}")
-            
-            
+
             ray.get(self.transfer_dock.put_prompts_experience.remote(batch, self.dataset_additional_keys))
             ray.get(self.mm_transfer_dock.put_experience.remote(batch, indexes=[i for i in range(len(batch['prompts']) * self.n_samples_per_prompt)]))
             with Timer(name='iteration', logger=None) as all_timer:

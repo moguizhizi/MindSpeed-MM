@@ -7,7 +7,7 @@ from einops import rearrange, repeat
 
 from megatron.core import InferenceParams, mpu
 from megatron.core import tensor_parallel
-from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region, scatter_to_sequence_parallel_region
 from megatron.training import get_args
 from megatron.training.arguments import core_transformer_config_from_args
 
@@ -189,6 +189,7 @@ class VLMModel(MultiModalModule):
         
         pre_process = pipeline_start_index == 0
         post_process = pipeline_end_index == config.num_layers
+        first_k_dense_replace = config.first_k_dense_replace - pipeline_start_index
 
         print(
             f"text decoder pipeline config:\
@@ -199,6 +200,7 @@ class VLMModel(MultiModalModule):
         )
         # num_layers will be divided by pp_size in TransformerBlock from megatron.core
         config.num_layers = self.pp_size * local_num_layers
+        config.first_k_dense_replace = first_k_dense_replace
 
         return MOEModel(
                 config=config,
@@ -455,8 +457,11 @@ class VLMModel(MultiModalModule):
             if self.text_decoder.pre_process:
                 input_embeds = self.text_decoder.embedding(input_ids=input_ids, position_ids=position_ids).clone()
                 if vit_embeds is not None:
+                    if self.config.sequence_parallel:
+                        input_embeds = gather_from_sequence_parallel_region(input_embeds)
                     input_embeds = self.combine_images_embeds(input_embeds, vit_embeds, images_seq_mask, images_spatial_crop)
-
+                    if self.config.sequence_parallel:
+                        input_embeds = scatter_to_sequence_parallel_region(input_embeds)
             attention_mask, position_ids = \
                 prepare_positionsids_mask_for_llm(
                     config=self.config,
