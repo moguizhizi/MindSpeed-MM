@@ -73,9 +73,12 @@ class MultiModalDataset(BaseDataset):
         """
         row_dict: dict = self.dataset[index]
         chat = row_dict.pop(self.prompt_key)
+        messages = [
+            {"role": "user", "content": chat}
+        ]
         has_image = self.image_key in row_dict
 
-        prompt_with_chat_template = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
+        prompt_with_chat_template = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
 
         self.init_multimodal_row_dict(row_dict)
         is_multi_modal = self.image_key in row_dict or self.video_key in row_dict
