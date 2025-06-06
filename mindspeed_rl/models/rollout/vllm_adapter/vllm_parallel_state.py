@@ -213,6 +213,7 @@ def initialize_model_parallel_for_vllm(
         use_message_queue_broadcaster=True,
     )
     ps._TP = _TP
+    
     num_pipeline_model_parallel_groups: int = world_size // infer_pipeline_model_parallel_size
     global _PP
     if _PP is not None:
