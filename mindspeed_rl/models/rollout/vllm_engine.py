@@ -142,9 +142,11 @@ class VLLMInferEngine(BaseInferEngine):
 
         # Initialize parallel state if tensor parallel size is specified
         if train_tensor_parallel_size is not None:
+            
             num_tp_per_train_tp = train_tensor_parallel_size // infer_tensor_parallel_size
             os.environ['CUDA_TIMER_STREAM_KAFKA_ENABLE'] = '0'
             os.environ['MEGATRON_IMPORT_TIMERS'] = '0'
+            
             initialize_parallel_state(
                 infer_tensor_model_parallel_size=infer_tensor_parallel_size,
                 train_tensor_model_parallel_size=train_tensor_parallel_size,
