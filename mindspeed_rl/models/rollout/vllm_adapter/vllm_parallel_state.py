@@ -62,7 +62,9 @@ def initialize_parallel_state(
     world_size = int(os.getenv("WORLD_SIZE", "-1"))
     if world_size == -1:
         raise ValueError("The world_size is set to -1, not initialized by TORCHRUN")
+    
     init_distributed_environment(world_size, rank, distributed_init_method, local_rank, backend)
+    
     if torch.distributed.get_world_size() > 1:
         # NOTE: build a sepearate inference group with infer tp & micro dp
         initialize_model_parallel_for_vllm(
