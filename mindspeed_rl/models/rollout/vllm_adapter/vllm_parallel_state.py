@@ -197,12 +197,15 @@ def initialize_model_parallel_for_vllm(
         return group_ranks
 
     def get_tp_group_ranks():
+        
         if infer_tensor_model_parallel_size > train_tensor_model_parallel_size:
             tp_group_ranks = get_split_tp_group_ranks()
         else:
             tp_group_ranks = get_allgather_tp_group_ranks()
+            
         global _TP_GROUP_RANKS
         _TP_GROUP_RANKS = tp_group_ranks
+        
         return tp_group_ranks
 
 
