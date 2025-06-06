@@ -158,10 +158,12 @@ def initialize_model_parallel_for_vllm(
             raise ValueError(
                 f"Can't split train tp size {train_tensor_model_parallel_size} to infer tp size {infer_tensor_model_parallel_size} "
                 f"with train dp size {(world_size // (train_tensor_model_parallel_size * train_pipeline_model_parallel_size))}.")
+            
         group_ranks = []
         for i in range(world_size // infer_tensor_model_parallel_size):
             ranks = list(range(i * infer_tensor_model_parallel_size, (i + 1) * infer_tensor_model_parallel_size))
             group_ranks.append(ranks)
+            
         return group_ranks
 
     def get_allgather_tp_group_ranks():
@@ -184,6 +186,7 @@ def initialize_model_parallel_for_vllm(
         '''
         if train_tensor_model_parallel_size < infer_tensor_model_parallel_size or train_tensor_model_parallel_size % infer_tensor_model_parallel_size != 0:
             raise ValueError(f"Can't gather train tp size {train_tensor_model_parallel_size} to infer tp size {infer_tensor_model_parallel_size}")
+        
         num_tensor_model_parallel_groups = world_size // infer_tensor_model_parallel_size
         num_tensor_model_parallel_groups_per_train_tp = train_tensor_model_parallel_size // infer_tensor_model_parallel_size
         group_ranks = []
